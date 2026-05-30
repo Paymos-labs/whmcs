@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="160" viewBox="0 0 500 160" role="img" aria-label="Paymos">
+  <rect width="500" height="160" rx="24" fill="#101827"/>
+  <circle cx="82" cy="80" r="42" fill="#20C997"/>
+  <path d="M67 105V55h28c13 0 22 8 22 20s-9 20-22 20H82v10H67zm15-24h12c5 0 8-2 8-6s-3-6-8-6H82v12z" fill="#101827"/>
+  <text x="150" y="96" font-family="Arial, Helvetica, sans-serif" font-size="54" font-weight="700" fill="#F8FAFC">Paymos</text>
+</svg>
