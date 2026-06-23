@@ -54,8 +54,6 @@ final class Config
                     'Value' => 'Loaded from Paymos dashboard ZIP',
                 ),
                 'buttonText' => self::buttonTextField(),
-                'invoiceLifetime' => self::invoiceLifetimeField(),
-                'debugLogging' => self::debugLoggingField(),
             ));
         }
 
@@ -117,8 +115,6 @@ final class Config
                 'Description' => 'Paymos webhook secret for live events.',
             ),
             'buttonText' => self::buttonTextField(),
-            'invoiceLifetime' => self::invoiceLifetimeField(),
-            'debugLogging' => self::debugLoggingField(),
             'apiBaseUrl' => array(
                 'FriendlyName' => 'API Base URL',
                 'Type' => 'text',
@@ -247,22 +243,6 @@ final class Config
         return $buttonText === '' ? 'Pay with Paymos' : $buttonText;
     }
 
-    public function invoiceLifetimeSeconds()
-    {
-        $hours = (int) self::stringValue($this->params, 'invoiceLifetime');
-        if ($hours < 1 || $hours > 12) {
-            $hours = 12;
-        }
-
-        return $hours * 3600;
-    }
-
-    public function debugLogging()
-    {
-        $value = strtolower(self::stringValue($this->params, 'debugLogging'));
-        return in_array($value, array('on', 'yes', 'true', '1'), true);
-    }
-
     private function assertEnvironmentConfigured($environment)
     {
         $environment = $this->normalizeEnvironment($environment);
@@ -355,37 +335,6 @@ final class Config
             'Size' => '30',
             'Default' => 'Pay with Paymos',
             'Description' => 'Text shown on the WHMCS invoice payment button.',
-        );
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private static function invoiceLifetimeField()
-    {
-        return array(
-            'FriendlyName' => 'Invoice Lifetime',
-            'Type' => 'dropdown',
-            'Options' => array(
-                '1' => '1 hour',
-                '3' => '3 hours',
-                '6' => '6 hours',
-                '12' => '12 hours',
-            ),
-            'Default' => '12',
-            'Description' => 'Paymos checkout lifetime for newly created invoices.',
-        );
-    }
-
-    /**
-     * @return array<string, mixed>
-     */
-    private static function debugLoggingField()
-    {
-        return array(
-            'FriendlyName' => 'Debug Logging',
-            'Type' => 'yesno',
-            'Description' => 'Enable verbose WHMCS gateway log entries for Paymos callbacks.',
         );
     }
 

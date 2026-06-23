@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace PaymosWhmcs;
 
 use Paymos\Client;
+use Paymos\Plugin\AmountGuard;
 use Paymos\Plugin\StatusMapper;
 
 final class Reconciler
@@ -62,7 +63,7 @@ final class Reconciler
     {
         return $this->matches((string) $row['project_id'], $this->field($invoice, array('project_id')))
             && $this->matches((string) $row['external_order_id'], $this->field($invoice, array('order', 'external_id')))
-            && $this->matches((string) $row['amount'], $this->field($invoice, array('order', 'amount')))
+            && $this->amountMatches((string) $row['amount'], $this->field($invoice, array('order', 'amount')))
             && $this->matches(strtoupper((string) $row['currency']), strtoupper($this->field($invoice, array('order', 'currency'))))
             && StatusMapper::invoiceAction('', $this->field($invoice, array('status'))) !== StatusMapper::ACTION_IGNORE;
     }
@@ -73,6 +74,20 @@ final class Reconciler
         $actual = trim((string) $actual);
 
         return $expected === '' || $actual === '' || $expected === $actual;
+    }
+
+    /**
+     * Amount equality must be decimal-safe: the server trims trailing zeros, so a
+     * stored snapshot "100.00" and the API's "100" are the same amount. A raw
+     * string === would treat them as different and silently skip every paid invoice
+     * during reconciliation — route the comparison through the SDK guard instead.
+     */
+    private function amountMatches($expected, $actual)
+    {
+        $expected = trim((string) $expected);
+        $actual = trim((string) $actual);
+
+        return $expected === '' || $actual === '' || AmountGuard::amountsEqual($expected, $actual);
     }
 
     /**

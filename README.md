@@ -5,7 +5,7 @@ WHMCS payment gateway for stablecoin payments. Customer pays the invoice in USDT
 **Two-minute setup**: the ZIP you download from [paymos.io/dashboard/cms](https://paymos.io/dashboard/cms) ships with your API keys pre-injected, your webhook callback URL pre-built from your WHMCS System URL, and your signing secret pre-registered. No copy-paste, no separate dashboard trip after upload.
 
 [![WHMCS 8.13+ / 9.0](https://img.shields.io/badge/WHMCS-8.13%2B%20%2F%209.0-2c5cc4)](https://www.whmcs.com/)
-[![PHP 7.4+](https://img.shields.io/badge/PHP-7.4%2B-777bb4)](https://www.php.net/)
+[![PHP per WHMCS version](https://img.shields.io/badge/PHP-per%20WHMCS%20version-777bb4)](https://www.php.net/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue)](LICENSE)
 
 - Full documentation: [paymos.io/docs/cms-whmcs](https://paymos.io/docs/cms-whmcs)
@@ -90,7 +90,7 @@ Working? Switch to **Mode: Live**. Done.
 ## Requirements
 
 - WHMCS **8.13+** or **9.0**
-- PHP version supported by your WHMCS install (7.4+)
+- PHP version supported by your WHMCS release. Do not infer the PHP floor from this module: WHMCS 8.13 adds PHP 8.3 support, and WHMCS 9.0+ requires PHP 8.2+.
 - A public HTTPS WHMCS System URL
 - An active Paymos account with a project
 
@@ -103,8 +103,8 @@ No Composer install required on your WHMCS server. The package ships with the Pa
 1. Customer opens an invoice in the WHMCS client area, picks **Paymos**.
 2. Plugin creates a Paymos invoice via the Merchant API using the WHMCS invoice total and currency.
 3. Customer is redirected to the hosted Paymos page.
-4. Customer pays in USDT or USDC on a supported chain (all major EVM chains plus Tron and TON).
-5. Paymos confirms the on-chain payment using a tiered policy — small tickets clear in seconds, large tickets wait for more confirmations.
+4. Customer pays in USDT or USDC across major EVM chains; USDT additionally settles on Tron and TON.
+5. Paymos confirms the on-chain payment — small payments clear in seconds, larger ones wait for more confirmations.
 6. Paymos sends a signed callback to your WHMCS server.
 7. Plugin verifies signature + timestamp + amount, then reverse-verifies the terminal state against the Paymos API.
 8. WHMCS marks the invoice paid.
@@ -122,10 +122,7 @@ The package pre-fills everything technical. WHMCS admin only exposes presentatio
 | Setting | What it controls |
 |---|---|
 | Mode | `Sandbox` for tests, `Live` for production. Switch without re-uploading. |
-| Display Name | Payment method title shown to clients on the invoice. |
 | Button Text | Label on the Paymos payment button. |
-| Invoice Lifetime | Paymos invoice expiry in hours. |
-| Debug Logging | Sanitized WHMCS transaction logs (off by default). |
 
 Generated values loaded from `modules/gateways/paymosgateway/paymos-config.php`, not editable in WHMCS:
 
@@ -174,7 +171,7 @@ Retry schedule: [paymos.io/docs/webhooks/retry](https://paymos.io/docs/webhooks/
 
 A WHMCS cron hook (`includes/hooks/paymosgateway_reconcile.php`) runs every 10 minutes and polls Paymos for any recent unpaid invoices. If a callback was missed in transit, the invoice catches up automatically.
 
-You can also force-check a single invoice from the gateway admin, or replay any event from [paymos.io/dashboard/developers/webhooks](https://paymos.io/dashboard/developers/webhooks).
+You can also replay any event from [paymos.io/dashboard/developers/webhooks](https://paymos.io/dashboard/developers/webhooks).
 
 WHMCS cron must be running for reconciliation to work. Most managed WHMCS hosts run it on a 5-minute schedule by default.
 
@@ -200,7 +197,7 @@ Sandbox guide: [paymos.io/docs/testing](https://paymos.io/docs/testing).
 | Paymos invoice state | WHMCS result |
 |---|---|
 | `invoice.paid` | WHMCS payment added |
-| `invoice.paid_over` | WHMCS payment added (overpayment recorded) |
+| `invoice.paid_over` | WHMCS invoice marked paid (the on-chain surplus is handled in the Paymos dashboard, not booked as a WHMCS credit) |
 | `invoice.confirming` | Logged, WHMCS invoice unchanged |
 | `invoice.underpaid_waiting` | Logged, WHMCS invoice unchanged |
 | `invoice.underpaid` | Logged, WHMCS invoice unchanged |
@@ -219,7 +216,7 @@ Invoice statuses reference: [paymos.io/docs/invoices/statuses](https://paymos.io
 Because the dashboard generates it that way. At download time, the server reads your merchant record, creates Sandbox and Live credentials if missing, derives the callback URL from the WHMCS System URL you typed, registers it on the Paymos side, and writes everything into `paymos-config.php` before zipping. You get a turn-key bundle.
 
 **Do I ever need to paste an API key into WHMCS?**
-No. WHMCS gateway settings never ask for one — they only expose display name, button text, mode, and invoice lifetime.
+No. WHMCS gateway settings never ask for one — they only expose the mode switch and the payment button text.
 
 **What if I change my WHMCS System URL?**
 Re-download the package from [paymos.io/dashboard/cms](https://paymos.io/dashboard/cms) after updating the URL in the dashboard. The new ZIP carries the updated callback URL and an updated `paymos-config.php`. Re-upload.

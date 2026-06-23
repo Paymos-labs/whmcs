@@ -18,7 +18,10 @@ function test_whmcs_reconciler_applies_missed_paid_invoice()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
-            'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
+            // Server trims trailing zeros: snapshot stored "100.00", API returns "100".
+            // The reconciler must treat these as equal (decimal-safe), not skip the
+            // invoice on a raw string mismatch.
+            'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
         )), array()),
     ));
     $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);

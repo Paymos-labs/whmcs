@@ -141,6 +141,22 @@ final class CallbackProcessor
         }
 
         $action = StatusMapper::invoiceAction($event->type(), $event->status());
+        $currentInvoice = $this->whmcs->getInvoice($whmcsInvoiceId);
+
+        // Roll-back / double-payment guard. WHMCS marks an invoice "Paid" once its
+        // balance hits zero; a second PAYMENT_COMPLETE event (paid then paid_over,
+        // or a reorg awaiting_payment → re-paid) carries a DISTINCT event id, so the
+        // tx id differs and checkCbTransID does NOT dedup it — a second
+        // addInvoicePayment would book an overpayment credit on the client. A late
+        // downgrade (cancelled/expired/underpaid after paid) must likewise not
+        // rewrite the snapshot or log a contradicting transaction. So once the WHMCS
+        // invoice is already Paid, ignore any further complete-or-downgrade event.
+        if ($this->invoiceIsPaid($currentInvoice) && $this->isCompleteOrDowngrade($action)) {
+            $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (invoice already paid)');
+            return false;
+        }
+
         $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
         $this->whmcs->logTransaction($gatewayName, $event->toArray(), $event->status() === '' ? $action : $event->status());
 
@@ -148,7 +164,6 @@ final class CallbackProcessor
             return false;
         }
 
-        $currentInvoice = $this->whmcs->getInvoice($whmcsInvoiceId);
         $currentAmount = $this->currentInvoiceAmount($currentInvoice, $row);
         $currentCurrency = $this->currentInvoiceCurrency($currentInvoice, $row);
 
@@ -160,7 +175,11 @@ final class CallbackProcessor
             $event->orderAmount(),
             $event->orderCurrency()
         )) {
-            throw new \RuntimeException(AmountGuard::mismatchSummary(
+            // An amount mismatch on a reverse-verified paid invoice is not a
+            // transient failure — the figures won't change on redelivery. Do not
+            // throw into the retry path (that 400s and the server retries forever);
+            // hold the invoice for manual review and acknowledge the webhook (200).
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Manual review: ' . AmountGuard::mismatchSummary(
                 $row['amount'],
                 $row['currency'],
                 $currentAmount,
@@ -168,12 +187,50 @@ final class CallbackProcessor
                 $event->orderAmount(),
                 $event->orderCurrency()
             ));
+            return false;
         }
 
         $transactionId = $this->transactionId($event);
         $this->whmcs->checkTransactionId($transactionId);
-        $this->whmcs->addInvoicePayment($whmcsInvoiceId, $transactionId, $currentAmount, '0.00', $gatewayName);
+        $this->whmcs->addInvoicePayment($whmcsInvoiceId, $transactionId, $currentAmount, $this->paymentFee($event), $gatewayName);
         return true;
+    }
+
+    /**
+     * @param array<string, mixed> $invoice
+     */
+    private function invoiceIsPaid(array $invoice)
+    {
+        return isset($invoice['status']) && is_scalar($invoice['status'])
+            && strtolower(trim((string) $invoice['status'])) === 'paid';
+    }
+
+    private function isCompleteOrDowngrade($action)
+    {
+        return in_array($action, array(
+            StatusMapper::ACTION_PAYMENT_COMPLETE,
+            StatusMapper::ACTION_CONFIRMING,
+            StatusMapper::ACTION_AWAITING_PAYMENT,
+            StatusMapper::ACTION_FAIL_ORDER,
+            StatusMapper::ACTION_CANCEL_ORDER,
+        ), true);
+    }
+
+    /**
+     * The gateway fee WHMCS should record for this payment. The webhook carries
+     * it at data.payment.fee (a decimal string, merchant-only — present on
+     * webhook payloads). Falls back to '0.00' when absent (e.g. sandbox events,
+     * which omit the payment object). Recording the real fee keeps WHMCS gateway
+     * accounting accurate instead of always reporting a zero fee.
+     */
+    private function paymentFee(WebhookEvent $event)
+    {
+        $fee = $this->field($event->toArray(), array('data', 'payment', 'fee'));
+        if ($fee === '' || !is_numeric($fee)) {
+            return '0.00';
+        }
+
+        return number_format((float) $fee, 2, '.', '');
     }
 
     private function transactionId(WebhookEvent $event)
@@ -255,7 +312,13 @@ final class CallbackProcessor
      */
     private function currentInvoiceAmount(array $invoice, array $row)
     {
-        foreach (array('balance', 'total', 'amount') as $key) {
+        // Compare against `total`, NOT `balance`. The stored snapshot row['amount']
+        // is the full invoice total captured when the Paymos invoice was created.
+        // `balance` shrinks with partial payments / applied account credit, so a
+        // legitimate full crypto payment would look like an amount mismatch
+        // (row.amount != balance) and AmountGuard would reject it — bouncing a
+        // real payment into manual review. `total` stays consistent with the snapshot.
+        foreach (array('total', 'amount', 'balance') as $key) {
             if (isset($invoice[$key]) && is_scalar($invoice[$key]) && trim((string) $invoice[$key]) !== '') {
                 return number_format((float) $invoice[$key], 2, '.', '');
             }
@@ -270,8 +333,14 @@ final class CallbackProcessor
      */
     private function currentInvoiceCurrency(array $invoice, array $row)
     {
-        if (isset($invoice['currency']) && is_scalar($invoice['currency']) && trim((string) $invoice['currency']) !== '') {
-            return strtoupper((string) $invoice['currency']);
+        // The WHMCS GetInvoice API response carries no currency field, so this
+        // fallback to the snapshot currency is the real source. We still try
+        // `currencycode`/`currency` first for the DB-shaped rows some call sites
+        // pass in — never let a missing field flip the AmountGuard currency check.
+        foreach (array('currencycode', 'currency') as $key) {
+            if (isset($invoice[$key]) && is_scalar($invoice[$key]) && trim((string) $invoice[$key]) !== '') {
+                return strtoupper(trim((string) $invoice[$key]));
+            }
         }
 
         return strtoupper((string) $row['currency']);

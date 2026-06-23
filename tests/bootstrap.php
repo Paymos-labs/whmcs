@@ -24,6 +24,7 @@ spl_autoload_register(static function ($class) {
             getenv('PAYMOS_SDK_SRC')
                 ? rtrim(getenv('PAYMOS_SDK_SRC'), '/\\') . '/' . str_replace('\\', '/', $relative) . '.php'
                 : null,
+            dirname(rtrim(PAYMOS_WHMCS_PLUGIN_DIR, '/\\')) . '/php-sdk/src/' . str_replace('\\', '/', $relative) . '.php',
         );
         foreach ($candidates as $candidate) {
             if ($candidate !== null && is_file($candidate)) {
@@ -86,8 +87,6 @@ function whmcs_gateway_params(array $overrides = array())
         'liveWebhookSecret' => 'whsec_live',
         'apiBaseUrl' => 'https://api.paymos.test',
         'buttonText' => 'Pay with Paymos',
-        'invoiceLifetime' => '12',
-        'debugLogging' => '',
         'invoiceid' => 42,
         'amount' => '100.00',
         'currency' => 'USD',

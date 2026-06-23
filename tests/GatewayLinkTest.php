@@ -16,7 +16,7 @@ function test_whmcs_gateway_link_creates_paymos_invoice_and_stores_snapshot()
         new HttpResponse(200, json_encode(array(
             'invoice_id' => 'inv_123',
             'status' => 'created',
-            'checkout_url' => 'https://checkout.paymos.test/inv_123',
+            'payment_url' => 'https://checkout.paymos.test/inv_123',
         )), array()),
     ));
     $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport, static function () {

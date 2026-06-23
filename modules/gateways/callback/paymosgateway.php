@@ -12,7 +12,7 @@ require_once __DIR__ . '/../paymosgateway/src/Autoloader.php';
 $gatewayModuleName = basename(__FILE__, '.php');
 $gatewayParams = getGatewayVariables($gatewayModuleName);
 
-if (!is_array($gatewayParams) || !isset($gatewayParams['type'])) {
+if (!is_array($gatewayParams) || empty($gatewayParams['type'])) {
     http_response_code(403);
     echo 'Module not activated';
     exit;

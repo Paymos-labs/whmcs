@@ -40,17 +40,7 @@ final class GatewayLink
         $payload = $this->createPayload($params, $config, $amount, $currency, $externalOrderId);
         $response = $this->client($config)->invoices()->create($payload);
         $paymosInvoiceId = $this->responseField($response, array('invoice_id'));
-        if ($paymosInvoiceId === '') {
-            $paymosInvoiceId = $this->responseField($response, array('id'));
-        }
-
-        $paymentUrl = $this->responseField($response, array('checkout_url'));
-        if ($paymentUrl === '') {
-            $paymentUrl = $this->responseField($response, array('payment_url'));
-        }
-        if ($paymentUrl === '') {
-            $paymentUrl = $this->responseField($response, array('url'));
-        }
+        $paymentUrl = $this->responseField($response, array('payment_url'));
         if ($paymosInvoiceId === '' || $paymentUrl === '') {
             throw new \RuntimeException('Paymos invoice create response is missing invoice id or payment URL.');
         }

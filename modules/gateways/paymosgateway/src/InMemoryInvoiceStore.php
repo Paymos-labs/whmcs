@@ -52,7 +52,7 @@ final class InMemoryInvoiceStore implements InvoiceStoreInterface
         $rows = array_values($this->rowsByExternalOrderId);
         $result = array();
         foreach ($rows as $row) {
-            if (in_array((string) $row['status'], array('paid', 'paid_over'), true)) {
+            if (in_array((string) $row['status'], array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled'), true)) {
                 continue;
             }
 
