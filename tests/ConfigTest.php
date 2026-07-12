@@ -173,9 +173,10 @@ function test_whmcs_module_config_does_not_expose_manual_test_mode()
 
     assertSameValue(false, array_key_exists('testMode', $fields), 'WHMCS config must not expose a manual test mode toggle.');
     assertSameValue('dropdown', $fields['mode']['Type'], 'WHMCS config must expose a Sandbox/Live mode dropdown.');
-    assertSameValue(false, array_key_exists('apiKey', $fields), 'new WHMCS config must not expose only one generic API key.');
-    assertSameValue('password', $fields['sandboxApiSecret']['Type'], 'sandbox API secret must be a password field.');
-    assertSameValue('password', $fields['liveApiSecret']['Type'], 'live API secret must be a password field.');
-    assertSameValue('password', $fields['sandboxWebhookSecret']['Type'], 'sandbox webhook secret must be a password field.');
-    assertSameValue('password', $fields['liveWebhookSecret']['Type'], 'live webhook secret must be a password field.');
+    assertSameValue(false, array_key_exists('apiKey', $fields), 'WHMCS config must not expose a generic API key.');
+    assertSameValue(false, array_key_exists('sandboxApiSecret', $fields), 'WHMCS config must not expose a sandbox API secret.');
+    assertSameValue(false, array_key_exists('liveApiSecret', $fields), 'WHMCS config must not expose a live API secret.');
+    assertSameValue(false, array_key_exists('sandboxWebhookSecret', $fields), 'WHMCS config must not expose a sandbox webhook secret.');
+    assertSameValue(false, array_key_exists('liveWebhookSecret', $fields), 'WHMCS config must not expose a live webhook secret.');
+    assertContainsValue('Not connected', $fields['generatedConfig']['Value'], 'WHMCS config must direct a new installation to Connect Paymos.');
 }

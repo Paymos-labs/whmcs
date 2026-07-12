@@ -68,7 +68,7 @@ function whmcs_gateway_params(array $overrides = array())
     $client = new stdClass();
     $client->id = 77;
 
-    return array_merge(array(
+    $params = array_merge(array(
         'paymentmethod' => 'paymosgateway',
         'name' => 'Paymos',
         'mode' => 'sandbox',
@@ -100,6 +100,27 @@ function whmcs_gateway_params(array $overrides = array())
             'lastname' => 'Example',
         ),
     ), $overrides);
+
+    PaymosWhmcs\Config::useConfigForTests(array(
+        'environments' => array(
+            'sandbox' => array(
+                'base_url' => (string) $params['apiBaseUrl'],
+                'api_key' => (string) $params['sandboxApiKey'],
+                'api_secret' => (string) $params['sandboxApiSecret'],
+                'project_id' => (string) $params['sandboxProjectId'],
+                'webhook_secret' => (string) $params['sandboxWebhookSecret'],
+            ),
+            'live' => array(
+                'base_url' => (string) $params['apiBaseUrl'],
+                'api_key' => (string) $params['liveApiKey'],
+                'api_secret' => (string) $params['liveApiSecret'],
+                'project_id' => (string) $params['liveProjectId'],
+                'webhook_secret' => (string) $params['liveWebhookSecret'],
+            ),
+        ),
+    ));
+
+    return $params;
 }
 
 function whmcs_signed_header($secret, $body, $timestamp)
@@ -109,11 +130,6 @@ function whmcs_signed_header($secret, $body, $timestamp)
 
 function paymos_whmcs_reset_test_state()
 {
-    $config = PAYMOS_WHMCS_MODULE_DIR . 'paymos-config.php';
-    if (is_file($config)) {
-        unlink($config);
-    }
-
     if (class_exists('PaymosWhmcs\\Config') && method_exists('PaymosWhmcs\\Config', 'resetForTests')) {
         PaymosWhmcs\Config::resetForTests();
     }
@@ -121,11 +137,8 @@ function paymos_whmcs_reset_test_state()
 
 function paymos_whmcs_write_generated_config($php)
 {
-    file_put_contents(PAYMOS_WHMCS_MODULE_DIR . 'paymos-config.php', "<?php\n\nreturn " . $php . ";\n");
-
-    if (class_exists('PaymosWhmcs\\Config') && method_exists('PaymosWhmcs\\Config', 'resetForTests')) {
-        PaymosWhmcs\Config::resetForTests();
-    }
+    $config = eval('return ' . $php . ';');
+    PaymosWhmcs\Config::useConfigForTests(is_array($config) ? $config : array());
 }
 
 function whmcs_invoice_event($eventId, $eventType, $status, array $overrides = array())
@@ -133,6 +146,7 @@ function whmcs_invoice_event($eventId, $eventType, $status, array $overrides = a
     return array_replace_recursive(array(
         'event_id' => $eventId,
         'event_type' => $eventType,
+        'version' => 1,
         'occurred_at' => 1709000000,
         'data' => array(
             'invoice_id' => 'inv_123',

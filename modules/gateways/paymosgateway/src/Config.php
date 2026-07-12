@@ -46,82 +46,15 @@ final class Config
             ),
         );
 
-        if (self::hasGeneratedConfig()) {
-            return array_merge($base, array(
-                'generatedConfig' => array(
-                    'FriendlyName' => 'Credentials',
-                    'Type' => 'System',
-                    'Value' => 'Loaded from Paymos dashboard ZIP',
-                ),
-                'buttonText' => self::buttonTextField(),
-            ));
-        }
-
         return array_merge($base, array(
-            'sandboxApiKey' => array(
-                'FriendlyName' => 'Sandbox API Key',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos sandbox public API key, starting with pk_test_.',
-            ),
-            'sandboxApiSecret' => array(
-                'FriendlyName' => 'Sandbox API Secret',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos sandbox API signing secret, starting with sk_test_.',
-            ),
-            'sandboxProjectId' => array(
-                'FriendlyName' => 'Sandbox Project ID',
-                'Type' => 'text',
-                'Size' => '35',
-                'Default' => '',
-                'Description' => 'Paymos sandbox project id.',
-            ),
-            'sandboxWebhookSecret' => array(
-                'FriendlyName' => 'Sandbox Webhook Secret',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos webhook secret for sandbox events.',
-            ),
-            'liveApiKey' => array(
-                'FriendlyName' => 'Live API Key',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos live public API key, starting with pk_live_.',
-            ),
-            'liveApiSecret' => array(
-                'FriendlyName' => 'Live API Secret',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos live API signing secret, starting with sk_live_.',
-            ),
-            'liveProjectId' => array(
-                'FriendlyName' => 'Live Project ID',
-                'Type' => 'text',
-                'Size' => '35',
-                'Default' => '',
-                'Description' => 'Paymos live project id.',
-            ),
-            'liveWebhookSecret' => array(
-                'FriendlyName' => 'Live Webhook Secret',
-                'Type' => 'password',
-                'Size' => '45',
-                'Default' => '',
-                'Description' => 'Paymos webhook secret for live events.',
+            'generatedConfig' => array(
+                'FriendlyName' => 'Connection',
+                'Type' => 'System',
+                'Value' => self::hasGeneratedConfig()
+                    ? 'Connected — credentials are encrypted in this WHMCS installation'
+                    : 'Not connected — click Connect Paymos and approve this installation',
             ),
             'buttonText' => self::buttonTextField(),
-            'apiBaseUrl' => array(
-                'FriendlyName' => 'API Base URL',
-                'Type' => 'text',
-                'Size' => '60',
-                'Default' => self::DEFAULT_BASE_URL,
-                'Description' => 'Production merchants should not change this unless Paymos support instructs them to.',
-            ),
         ));
     }
 
@@ -166,13 +99,13 @@ final class Config
     public function apiKey($environment = null)
     {
         $environment = $environment === null ? $this->environment() : $this->normalizeEnvironment($environment);
-        return $this->environmentValue($environment, 'ApiKey', 'apiKey');
+        return $this->environmentValue($environment, 'ApiKey');
     }
 
     public function apiSecret($environment = null)
     {
         $environment = $environment === null ? $this->environment() : $this->normalizeEnvironment($environment);
-        return $this->environmentValue($environment, 'ApiSecret', 'apiSecret');
+        return $this->environmentValue($environment, 'ApiSecret');
     }
 
     public function apiBaseUrl()
@@ -188,8 +121,7 @@ final class Config
             return rtrim((string) $config['base_url'], '/');
         }
 
-        $baseUrl = self::stringValue($this->params, 'apiBaseUrl');
-        return $baseUrl === '' ? self::DEFAULT_BASE_URL : rtrim($baseUrl, '/');
+        return self::DEFAULT_BASE_URL;
     }
 
     public function projectId($environment = null)
@@ -200,7 +132,7 @@ final class Config
     public function projectIdForEnvironment($environment)
     {
         $environment = $this->normalizeEnvironment($environment);
-        return $this->environmentValue($environment, 'ProjectId', 'projectId');
+        return $this->environmentValue($environment, 'ProjectId');
     }
 
     public function environment()
@@ -208,11 +140,6 @@ final class Config
         $mode = strtolower(self::stringValue($this->params, 'mode'));
         if (in_array($mode, array('sandbox', 'live'), true)) {
             return $mode;
-        }
-
-        $legacyKey = self::stringValue($this->params, 'apiKey');
-        if (strpos($legacyKey, 'pk_live_') === 0) {
-            return 'live';
         }
 
         return 'sandbox';
@@ -224,8 +151,8 @@ final class Config
     public function webhookSecrets()
     {
         $secrets = array();
-        $sandbox = $this->environmentValue('sandbox', 'WebhookSecret', 'webhookSecretSandbox');
-        $live = $this->environmentValue('live', 'WebhookSecret', 'webhookSecretLive');
+        $sandbox = $this->environmentValue('sandbox', 'WebhookSecret');
+        $live = $this->environmentValue('live', 'WebhookSecret');
 
         if ($sandbox !== '') {
             $secrets['sandbox'] = $sandbox;
@@ -247,15 +174,15 @@ final class Config
     {
         $environment = $this->normalizeEnvironment($environment);
         $fields = array(
-            'api key' => array($environment . 'ApiKey', 'apiKey'),
-            'api secret' => array($environment . 'ApiSecret', 'apiSecret'),
-            'project id' => array($environment . 'ProjectId', 'projectId'),
-            'webhook secret' => array($environment . 'WebhookSecret', $environment === 'sandbox' ? 'webhookSecretSandbox' : 'webhookSecretLive'),
+            'api key' => 'ApiKey',
+            'api secret' => 'ApiSecret',
+            'project id' => 'ProjectId',
+            'webhook secret' => 'WebhookSecret',
         );
 
-        foreach ($fields as $label => $keys) {
-            if ($this->environmentValue($environment, substr($keys[0], strlen($environment)), $keys[1]) === '') {
-                throw new \InvalidArgumentException('Paymos WHMCS config is missing ' . $keys[0] . ' (' . $environment . ' ' . $label . ').');
+        foreach ($fields as $label => $suffix) {
+            if ($this->environmentValue($environment, $suffix) === '') {
+                throw new \InvalidArgumentException('Paymos WHMCS config is missing ' . $environment . $suffix . ' (' . $environment . ' ' . $label . ').');
             }
         }
 
@@ -287,23 +214,13 @@ final class Config
         }
     }
 
-    private function environmentValue($environment, $suffix, $legacyKey)
+    private function environmentValue($environment, $suffix)
     {
         $environment = $this->normalizeEnvironment($environment);
         $generated = self::generatedEnvironment($environment);
         $generatedKey = self::generatedKeyForSuffix($suffix);
         if ($generatedKey !== '' && isset($generated[$generatedKey]) && is_scalar($generated[$generatedKey]) && trim((string) $generated[$generatedKey]) !== '') {
             return trim((string) $generated[$generatedKey]);
-        }
-
-        $key = $environment . $suffix;
-        $value = self::stringValue($this->params, $key);
-        if ($value !== '') {
-            return $value;
-        }
-
-        if ($legacyKey !== '') {
-            return self::stringValue($this->params, $legacyKey);
         }
 
         return '';
@@ -322,6 +239,12 @@ final class Config
     public static function resetForTests()
     {
         self::$generated = null;
+    }
+
+    /** @param array<string, mixed> $config */
+    public static function useConfigForTests(array $config)
+    {
+        self::$generated = $config;
     }
 
     /**
@@ -369,14 +292,20 @@ final class Config
             return self::$generated;
         }
 
-        $file = dirname(__DIR__) . '/paymos-config.php';
-        if (!is_readable($file)) {
-            self::$generated = array();
-            return self::$generated;
+        if (class_exists('WHMCS\\Database\\Capsule')) {
+            try {
+                $stored = CredentialStore::loadCredentials();
+                if (count($stored) > 0) {
+                    self::$generated = array('environments' => $stored);
+                    return self::$generated;
+                }
+            } catch (\Throwable $exception) {
+                self::$generated = array();
+                return self::$generated;
+            }
         }
 
-        $config = require $file;
-        self::$generated = is_array($config) ? $config : array();
+        self::$generated = array();
         return self::$generated;
     }
 
