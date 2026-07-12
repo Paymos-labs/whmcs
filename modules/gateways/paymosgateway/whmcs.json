@@ -2,7 +2,7 @@
   "schema": "1.0",
   "type": "whmcs-gateways",
   "name": "paymosgateway",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "license": "MIT",
   "category": "payments",
   "description": {
@@ -23,7 +23,7 @@
     "homepage": "https://paymos.io",
     "learn_more": "https://paymos.io",
     "email": "support@paymos.io",
-    "support_url": "https://paymos.io/support",
+    "support_url": "https://app.paymos.io/support",
     "docs_url": "https://paymos.io/docs"
   },
   "authors": [
