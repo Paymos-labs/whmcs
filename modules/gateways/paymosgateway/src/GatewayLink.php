@@ -30,9 +30,10 @@ final class GatewayLink
         $amount = $this->amount($this->field($params, 'amount'));
         $currency = strtoupper($this->field($params, 'currency'));
         $existing = $this->store->findByWhmcsInvoiceId($invoiceId);
+        $buttonText = $this->buttonText($params, $config);
 
         if (is_array($existing) && $this->snapshotMatches($existing, $amount, $currency, $config)) {
-            return $this->button($existing['payment_url'], $config->buttonText());
+            return $this->button($existing['payment_url'], $buttonText);
         }
 
         $renewCount = is_array($existing) && isset($existing['renew_count']) ? ((int) $existing['renew_count'] + 1) : 0;
@@ -58,7 +59,7 @@ final class GatewayLink
             'renew_count' => $renewCount,
         ));
 
-        return $this->button($paymentUrl, $config->buttonText());
+        return $this->button($paymentUrl, $buttonText);
     }
 
     /**
@@ -103,6 +104,19 @@ final class GatewayLink
         return '<form method="get" action="' . $url . '">'
             . '<button type="submit" class="btn btn-success">' . $text . '</button>'
             . '</form>';
+    }
+
+    /**
+     * @param array<string, mixed> $params
+     */
+    private function buttonText(array $params, Config $config)
+    {
+        $configured = $config->buttonText();
+        if ($configured !== '' && $configured !== 'Pay with Paymos') {
+            return $configured;
+        }
+
+        return Translation::text('pay_button', $params);
     }
 
     private function client(Config $config)
