@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 require __DIR__ . '/bootstrap.php';
 require __DIR__ . '/ConfigTest.php';
+require __DIR__ . '/TranslationTest.php';
 require __DIR__ . '/GatewayLinkTest.php';
 require __DIR__ . '/EventStoreTest.php';
 require __DIR__ . '/CallbackProcessorTest.php';

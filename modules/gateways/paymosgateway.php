@@ -45,8 +45,9 @@ function paymosgateway_link($params)
         }
 
         $detail = $e->detail();
-        if ($detail === null || $detail === '') {
-            $detail = 'This payment method cannot be used for this invoice.';
+        $isRussian = \PaymosWhmcs\Translation::text('pay_button', $params) !== 'Pay with Paymos';
+        if ($detail === null || $detail === '' || $isRussian) {
+            $detail = \PaymosWhmcs\Translation::text('payment_cannot_be_used', $params);
         }
         $field = $e->field();
         if ($field !== null && $field !== '') {
@@ -59,6 +60,8 @@ function paymosgateway_link($params)
             logTransaction('paymosgateway', array('error' => $e->getMessage()), 'Error');
         }
 
-        return '<div class="alert alert-danger">Paymos is temporarily unavailable. Please contact support.</div>';
+        return '<div class="alert alert-danger">'
+            . htmlspecialchars(\PaymosWhmcs\Translation::text('payment_unavailable', $params), ENT_QUOTES, 'UTF-8')
+            . '</div>';
     }
 }

@@ -70,6 +70,29 @@ function test_whmcs_gateway_link_does_not_use_email_as_client_id()
     assertSameValue(false, isset($payload['client_id']), 'Paymos create payload must not use email as client_id.');
 }
 
+function test_whmcs_gateway_link_localizes_default_button_for_russian_client()
+{
+    $store = new InMemoryInvoiceStore();
+    $store->save(array(
+        'whmcs_invoice_id' => 42,
+        'paymos_invoice_id' => 'inv_existing',
+        'external_order_id' => 'whmcs_42_0',
+        'environment' => 'sandbox',
+        'project_id' => 'prj_123',
+        'amount' => '100.00',
+        'currency' => 'USD',
+        'payment_url' => 'https://checkout.paymos.test/existing',
+        'status' => 'created',
+        'renew_count' => 0,
+    ));
+
+    $html = (new GatewayLink($store))->render(whmcs_gateway_params(array(
+        'clientdetails' => array('language' => 'ru-RU'),
+    )));
+
+    assertContainsValue('Оплатить через Paymos', $html, 'Default WHMCS button must follow the client language.');
+}
+
 function test_whmcs_gateway_link_reuses_existing_invoice_when_snapshot_matches()
 {
     $store = new InMemoryInvoiceStore();
