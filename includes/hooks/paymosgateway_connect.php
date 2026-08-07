@@ -27,7 +27,10 @@ if (isset($_POST['paymos_connect_action'])) {
         }
         $client = new \Paymos\Connect\DeviceConnectClient('https://app.paymos.io');
         if ($_POST['paymos_connect_action'] === 'start') {
-            $state = $client->start('whmcs', $systemUrl);
+            // The admin page posts its own URL so approval can return the merchant to it.
+            // Paymos drops it unless it shares an origin with the System URL above.
+            $returnUrl = isset($_POST['paymos_return_url']) ? (string) $_POST['paymos_return_url'] : '';
+            $state = $client->start('whmcs', $systemUrl, $returnUrl);
             \PaymosWhmcs\CredentialStore::saveState($state);
             echo json_encode(array(
                 'verification_url' => $state['verification_url'],
@@ -75,6 +78,18 @@ add_hook('AdminAreaFooterOutput', 1, static function ($vars) {
     $token = isset($vars['token']) ? (string) $vars['token'] : '';
     return '<script>(function(){var form=document.querySelector("form");if(!form||document.getElementById("paymos-connect-button"))return;'
         . 'var box=document.createElement("div");box.className="alert alert-info";box.innerHTML="<strong>Paymos</strong><br><button type=\\"button\\" class=\\"btn btn-primary\\" id=\\"paymos-connect-button\\">Connect Paymos</button> <span id=\\"paymos-connect-status\\"></span>";form.prepend(box);'
-        . 'var b=document.getElementById("paymos-connect-button"),s=document.getElementById("paymos-connect-status");function post(a){var d=new URLSearchParams({paymos_connect_action:a,token:' . json_encode($token) . '});return fetch(location.href,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:d.toString()}).then(function(r){return r.json();});}'
-        . 'b.onclick=function(){b.disabled=true;s.textContent="Starting…";post("start").then(function(j){if(j.error)throw new Error(j.error);window.open(j.verification_url,"_blank","noopener,noreferrer");s.textContent=" Waiting for approval. Code: "+j.user_code;var i=Math.max(1,Number(j.interval||5))*1000;setTimeout(function p(){post("poll").then(function(x){if(x.error)throw new Error(x.error);if(x.status==="connected"){location.reload();return;}setTimeout(p,x.status==="slow_down"?i+5000:i);}).catch(function(e){s.textContent=e.message;b.disabled=false;});},i);}).catch(function(e){s.textContent=e.message;b.disabled=false;});};})();</script>';
+        . 'var b=document.getElementById("paymos-connect-button"),s=document.getElementById("paymos-connect-status"),manual=false;'
+        . 'function post(a,r){var o={paymos_connect_action:a,token:' . json_encode($token) . '};if(r)o.paymos_return_url=r;var d=new URLSearchParams(o);return fetch(location.href,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:d.toString()}).then(function(r2){return r2.json();});}'
+        . 'function say(t){if(!manual)s.textContent=t;}'
+        /* The tab is opened synchronously here: browsers only honour window.open for a
+           few seconds after the click, so opening it once the start request resolves is
+           blocked on slow connections. No feature string — that would ask for a popup. */
+        . 'b.onclick=function(){b.disabled=true;manual=false;s.textContent="Starting…";'
+        . 'var t=window.open("","_blank");if(t){try{t.opener=null;}catch(e){}}'
+        . 'post("start",location.href).then(function(j){if(j.error)throw new Error(j.error);'
+        . 'if(t&&!t.closed){t.location=j.verification_url;s.textContent=" Waiting for approval. Code: "+j.user_code;}'
+        . 'else{manual=true;s.textContent="";var a=document.createElement("a");a.href=j.verification_url;a.target="_blank";a.rel="noopener noreferrer";a.textContent="Open the approval page";'
+        . 's.appendChild(document.createTextNode("Your browser blocked the approval tab. "));s.appendChild(a);s.appendChild(document.createTextNode(" Code: "+j.user_code));}'
+        . 'var i=Math.max(1,Number(j.interval||5))*1000;setTimeout(function p(){post("poll").then(function(x){if(x.error)throw new Error(x.error);if(x.status==="connected"){location.reload();return;}setTimeout(p,x.status==="slow_down"?i+5000:i);}).catch(function(e){say(e.message);b.disabled=false;});},i);'
+        . '}).catch(function(e){if(t&&!t.closed)t.close();s.textContent=e.message;b.disabled=false;});};})();</script>';
 });
