@@ -44,9 +44,10 @@ function paymosgateway_link($params)
             ), 'Error');
         }
 
+        // The API's detail is English. On a store that reads another language it
+        // would sit inside a translated page, so prefer our own localized line.
         $detail = $e->detail();
-        $isRussian = \PaymosWhmcs\Translation::text('pay_button', $params) !== 'Pay with Paymos';
-        if ($detail === null || $detail === '' || $isRussian) {
+        if ($detail === null || $detail === '' || !\PaymosWhmcs\Translation::isEnglish($params)) {
             $detail = \PaymosWhmcs\Translation::text('payment_cannot_be_used', $params);
         }
         $field = $e->field();
