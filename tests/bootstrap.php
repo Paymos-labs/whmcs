@@ -2,7 +2,34 @@
 
 declare(strict_types=1);
 
+if (!function_exists('add_hook')) {
+    function add_hook($hook, $priority, $function) {}
+}
+if (!function_exists('check_token')) {
+    function check_token($name = 'token', $form = '') { return true; }
+}
+if (!function_exists('get_admin_url')) {
+    function get_admin_url($path = '') { return 'https://whmcs.test/admin/' . $path; }
+}
+
+// WHMCS defines this before any module file loads; the compile-all gate
+// requires the guarded entry files exactly like the platform does.
+if (!defined('WHMCS')) {
+    define('WHMCS', true);
+}
+
 define('PAYMOS_WHMCS_PLUGIN_DIR', dirname(__DIR__) . DIRECTORY_SEPARATOR);
+
+// Any deprecation, notice or warning inside plugin code must fail the run:
+// platform installers (Magento DI compile above all) escalate PHP 8.4+
+// deprecations to fatals, and a silent one here is how rejections slip through.
+error_reporting(E_ALL);
+set_error_handler(static function ($severity, $message, $file, $line) {
+    if (!(error_reporting() & $severity)) {
+        return false;
+    }
+    throw new ErrorException($message, 0, $severity, $file, $line);
+});
 define('PAYMOS_WHMCS_MODULE_DIR', PAYMOS_WHMCS_PLUGIN_DIR . 'modules/gateways/paymosgateway/');
 
 spl_autoload_register(static function ($class) {
