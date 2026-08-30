@@ -15,12 +15,19 @@ if (is_file($paymosAutoloader)) {
 if (isset($_POST['paymos_connect_action'])) {
     header('Content-Type: application/json');
     try {
-        if (empty($_SESSION['adminid'])) {
+        // WHMCS 9 initializes the session lazily; WHMCS\Session::get works
+        // across both the legacy and the lazy session implementations.
+        $adminId = class_exists('\WHMCS\Session') ? \WHMCS\Session::get('adminid') : ($_SESSION['adminid'] ?? null);
+        if (empty($adminId)) {
             throw new \RuntimeException('Access denied.');
         }
-        if (function_exists('check_token')) {
-            check_token('WHMCS.admin.default');
+        // Missing CSRF protection must refuse the request, not skip the check:
+        // check_token has existed in every supported WHMCS 8/9, so its absence
+        // means an unexpected runtime, and the connect action mutates credentials.
+        if (!function_exists('check_token')) {
+            throw new \RuntimeException('CSRF protection is unavailable.');
         }
+        check_token('WHMCS.admin.default');
         $systemUrl = rtrim((string) \WHMCS\Config\Setting::getValue('SystemURL'), '/');
         if ($systemUrl === '' || stripos($systemUrl, 'https://') !== 0) {
             throw new \RuntimeException('WHMCS System URL must use HTTPS.');
