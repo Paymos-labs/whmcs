@@ -8,6 +8,25 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.3.7] - 2026-08-30
+
+- fix(plugins): implicitly nullable factory params break Magento DI compile on PHP 8.5
+- chore: rebuild canonical CMS package
+
+### Fixed
+- Four of the six shipped catalogues were unreachable. The language resolver
+  answered exactly two things — `russian` or `english` — so `german.php`,
+  `spanish.php`, `turkish.php` and `chinese.php` sat in the package and were
+  never read; a German store showed English. It now accepts both WHMCS's English
+  language names and ISO codes, and returns only a language we ship a catalogue
+  for.
+
+### Changed
+- Whether to surface the API's English error detail is decided by
+  `Translation::isEnglish()` instead of comparing the pay button's label against
+  its English text — a coupling that would have leaked raw English into a
+  translated page the moment one catalogue left that label untranslated.
+
 ## [1.3.6] - 2026-08-28
 
 - release: the changelog rot had a cause, and it was not the one I named

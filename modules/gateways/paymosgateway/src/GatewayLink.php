@@ -14,7 +14,7 @@ final class GatewayLink
     /** @var callable|null */
     private $clientFactory;
 
-    public function __construct(InvoiceStoreInterface $store, callable $clientFactory = null)
+    public function __construct(InvoiceStoreInterface $store, ?callable $clientFactory = null)
     {
         $this->store = $store;
         $this->clientFactory = $clientFactory;
