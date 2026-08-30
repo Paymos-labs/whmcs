@@ -33,7 +33,7 @@ final class CallbackProcessor
         WhmcsAdapterInterface $whmcs,
         InvoiceStoreInterface $invoiceStore,
         EventStoreInterface $eventStore,
-        callable $clientFactory = null
+        ?callable $clientFactory = null
     ) {
         $this->whmcs = $whmcs;
         $this->invoiceStore = $invoiceStore;
