@@ -6,6 +6,24 @@ namespace PaymosWhmcs;
 
 final class InvoiceStore implements InvoiceStoreInterface
 {
+    /**
+     * Row status for a Paymos invoice whose WHMCS invoice no longer exists
+     * (deleted by the admin). Not a Paymos status: it only closes the row so the
+     * reconciler stops fetching it.
+     */
+    public const STATUS_WHMCS_INVOICE_MISSING = 'whmcs_invoice_missing';
+
+    /**
+     * Row statuses the reconciler never needs to fetch again: the five final
+     * Paymos statuses plus the orphan marker above.
+     *
+     * @return array<int, string>
+     */
+    public static function closedStatuses()
+    {
+        return array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled', self::STATUS_WHMCS_INVOICE_MISSING);
+    }
+
     /** @var InMemoryInvoiceStore|null */
     private $fallback;
 
@@ -51,6 +69,7 @@ final class InvoiceStore implements InvoiceStoreInterface
             'environment' => (string) $row['environment'],
             'project_id' => (string) $row['project_id'],
             'amount' => (string) $row['amount'],
+            'invoice_total' => isset($row['invoice_total']) ? (string) $row['invoice_total'] : '',
             'currency' => strtoupper((string) $row['currency']),
             'payment_url' => (string) $row['payment_url'],
             'status' => (string) $row['status'],
@@ -94,9 +113,8 @@ final class InvoiceStore implements InvoiceStoreInterface
             return $this->fallback()->findUnpaidRecent($limit, $sinceTimestamp);
         }
 
-        $terminal = array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled');
         $rows = \WHMCS\Database\Capsule::table(Migrations::INVOICES_TABLE)
-            ->whereNotIn('status', $terminal)
+            ->whereNotIn('status', self::closedStatuses())
             ->where('created_at', '>=', date('Y-m-d H:i:s', (int) $sinceTimestamp))
             ->orderBy('id', 'desc')
             ->limit((int) $limit)

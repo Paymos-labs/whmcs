@@ -4,10 +4,17 @@ declare(strict_types=1);
 
 namespace PaymosWhmcs;
 
-use Paymos\Webhook\EventStoreInterface;
+use Paymos\Webhook\CommitAwareEventStoreInterface;
 
-final class EventStore implements EventStoreInterface
+final class EventStore implements CommitAwareEventStoreInterface
 {
+    /**
+     * Lifetime of the in-flight lock remember() takes. commit() extends the row
+     * to the full dedup window, so a row that outlives its reservation was
+     * committed (see isCommitted()).
+     */
+    private const RESERVATION_SECONDS = 300;
+
     /** @var InMemoryEventStore|null */
     private $fallback;
 
@@ -39,7 +46,7 @@ final class EventStore implements EventStoreInterface
         try {
             \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)->insert(array(
                 'event_id' => $eventId,
-                'expires_at' => $now + 300,
+                'expires_at' => $now + self::RESERVATION_SECONDS,
                 'created_at' => $now,
             ));
         } catch (\Exception $e) {
@@ -50,6 +57,31 @@ final class EventStore implements EventStoreInterface
         $this->pendingTtlSeconds = (int) $ttlSeconds;
 
         return true;
+    }
+
+    /**
+     * Whether the event was processed and committed — as opposed to merely
+     * locked by a delivery that has not finished (BUG-103: that one must be
+     * answered non-2xx, or a retry arriving mid-processing marks it delivered).
+     * A committed row lives past its reservation; a lock does not.
+     */
+    public function isCommitted($eventId)
+    {
+        if (!$this->hasCapsule()) {
+            return $this->fallback()->isCommitted($eventId);
+        }
+
+        $row = \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)
+            ->where('event_id', (string) $eventId)
+            ->first();
+        if (!$row) {
+            return false;
+        }
+
+        $expiresAt = isset($row->expires_at) ? (int) $row->expires_at : 0;
+        $createdAt = isset($row->created_at) ? (int) $row->created_at : 0;
+
+        return $expiresAt > time() && $expiresAt > $createdAt + self::RESERVATION_SECONDS;
     }
 
     public function commit()

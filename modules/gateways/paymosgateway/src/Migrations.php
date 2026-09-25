@@ -26,12 +26,21 @@ final class Migrations
                 $table->string('environment', 16)->index();
                 $table->string('project_id', 128)->index();
                 $table->string('amount', 64);
+                $table->string('invoice_total', 64)->nullable();
                 $table->string('currency', 16);
                 $table->text('payment_url');
                 $table->string('status', 64)->index();
                 $table->integer('renew_count')->unsigned()->default(0);
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
+            });
+        }
+
+        // Added after the first release: the WHMCS invoice total next to the
+        // amount due (see GatewayLink::invoiceTotal). Older rows keep NULL.
+        if (!$schema->hasColumn(self::INVOICES_TABLE, 'invoice_total')) {
+            $schema->table(self::INVOICES_TABLE, static function ($table) {
+                $table->string('invoice_total', 64)->nullable();
             });
         }
 

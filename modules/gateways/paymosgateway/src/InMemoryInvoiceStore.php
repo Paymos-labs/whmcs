@@ -52,7 +52,7 @@ final class InMemoryInvoiceStore implements InvoiceStoreInterface
         $rows = array_values($this->rowsByExternalOrderId);
         $result = array();
         foreach ($rows as $row) {
-            if (in_array((string) $row['status'], array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled'), true)) {
+            if (in_array((string) $row['status'], InvoiceStore::closedStatuses(), true)) {
                 continue;
             }
 
@@ -78,6 +78,7 @@ final class InMemoryInvoiceStore implements InvoiceStoreInterface
             'environment' => '',
             'project_id' => '',
             'amount' => '',
+            'invoice_total' => '',
             'currency' => '',
             'payment_url' => '',
             'status' => '',

@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace PaymosWhmcs;
 
 use Paymos\Client;
+use Paymos\Exception\NotFoundException;
+use Paymos\Plugin\InvoiceRenewal;
+use Paymos\Plugin\StatusMapper;
 
 final class GatewayLink
 {
@@ -14,10 +17,14 @@ final class GatewayLink
     /** @var callable|null */
     private $clientFactory;
 
-    public function __construct(InvoiceStoreInterface $store, ?callable $clientFactory = null)
+    /** @var WhmcsAdapterInterface */
+    private $whmcs;
+
+    public function __construct(InvoiceStoreInterface $store, ?callable $clientFactory = null, ?WhmcsAdapterInterface $whmcs = null)
     {
         $this->store = $store;
         $this->clientFactory = $clientFactory;
+        $this->whmcs = $whmcs !== null ? $whmcs : new WhmcsAdapter();
     }
 
     /**
@@ -32,7 +39,8 @@ final class GatewayLink
         $existing = $this->store->findByWhmcsInvoiceId($invoiceId);
         $buttonText = $this->buttonText($params, $config);
 
-        if (is_array($existing) && $this->snapshotMatches($existing, $amount, $currency, $config)) {
+        if (is_array($existing) && $this->snapshotMatches($existing, $amount, $currency, $config)
+            && $this->keepsExistingInvoice($existing, $config)) {
             return $this->button($existing['payment_url'], $buttonText);
         }
 
@@ -53,6 +61,7 @@ final class GatewayLink
             'environment' => $config->environment(),
             'project_id' => $config->projectId(),
             'amount' => $amount,
+            'invoice_total' => $this->invoiceTotal($invoiceId),
             'currency' => $currency,
             'payment_url' => $paymentUrl,
             'status' => $this->responseField($response, array('status')) ?: 'created',
@@ -96,6 +105,55 @@ final class GatewayLink
             && trim((string) $row['payment_url']) !== '';
     }
 
+    /**
+     * Whether the Paymos invoice behind a matching snapshot is still the one to
+     * send the buyer to.
+     *
+     * A matching amount is not enough: the server answers a repeated
+     * external_order_id with the same invoice whatever became of it, and a buyer
+     * returning after it ended would land on an expired checkout. Its deadline is
+     * the server's, not a copy kept here: confirming a network moves expires_at to
+     * now + InvoiceOptions.PaymentTtl and sends no webhook. So: a row that already
+     * ended unpaid is renewed at once (that final status came from the server and
+     * never changes again); a paid one is kept (a second invoice would invite a
+     * second payment); anything else is read back from the server (one GET) and
+     * renewed only if the server says it ended unpaid or was never started before
+     * its deadline (InvoiceRenewal). An invoice the server holds open — network
+     * picked, funds confirming, part paid — is kept. When the server cannot be
+     * reached the existing link is kept — the checkout it leads to is down just the
+     * same.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function keepsExistingInvoice(array $row, Config $config)
+    {
+        if (InvoiceRenewal::isRequired($row)) {
+            return false;
+        }
+        if (StatusMapper::isFinalStatus(isset($row['status']) ? (string) $row['status'] : '')) {
+            return true;
+        }
+
+        try {
+            $invoice = $this->client($config)->invoices()->get((string) $row['paymos_invoice_id']);
+        } catch (NotFoundException $e) {
+            return false;
+        } catch (\Exception $e) {
+            return true;
+        }
+
+        if (!InvoiceRenewal::isRequired($invoice)) {
+            return true;
+        }
+
+        $status = $this->responseField($invoice, array('status'));
+        if ($status !== '') {
+            $this->store->updateStatus((string) $row['paymos_invoice_id'], $status);
+        }
+
+        return false;
+    }
+
     private function button($url, $text)
     {
         $url = htmlspecialchars((string) $url, ENT_QUOTES, 'UTF-8');
@@ -126,6 +184,30 @@ final class GatewayLink
         }
 
         return new Client($config->clientConfig());
+    }
+
+    /**
+     * The WHMCS invoice total at the moment the Paymos invoice is cut.
+     *
+     * `$params['amount']` is the amount still DUE, not the total: after a
+     * partial payment or applied credit it is smaller. The callback checks that
+     * the invoice itself did not change by comparing this total with the
+     * current one — comparing the amount due with the total would send every
+     * paid balance to manual review. Empty when WHMCS cannot say (the callback
+     * then falls back to comparing the amount due with the total).
+     */
+    private function invoiceTotal($invoiceId)
+    {
+        try {
+            $invoice = $this->whmcs->getInvoice($invoiceId);
+        } catch (\RuntimeException $e) {
+            return '';
+        }
+        if (isset($invoice['total']) && is_scalar($invoice['total']) && is_numeric(trim((string) $invoice['total']))) {
+            return $this->amount($invoice['total']);
+        }
+
+        return '';
     }
 
     private function amount($amount)
