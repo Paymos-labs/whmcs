@@ -47,7 +47,9 @@ final class Reconciler
                 if ($applied) {
                     $count++;
                 }
-            } catch (\Exception $e) {
+            } catch (\Throwable $e) {
+                // \Throwable, not \Exception: a TypeError on one malformed row must
+                // not end the AfterCronJob hook for every row (and hook) after it.
                 $this->whmcs->logTransaction('paymosgateway', array('error' => $e->getMessage(), 'row' => $row), 'Reconcile error');
             }
         }

@@ -12,6 +12,21 @@ if (!function_exists('get_admin_url')) {
     function get_admin_url($path = '') { return 'https://whmcs.test/admin/' . $path; }
 }
 
+// WHMCS's in-process API. A test that drives the real WhmcsAdapter installs a
+// handler in $GLOBALS['paymos_whmcs_local_api']; without one every command fails
+// the way localAPI reports a failure: result=error plus a message.
+if (!function_exists('localAPI')) {
+    function localAPI($command, $values = array(), $adminUser = null)
+    {
+        $handler = isset($GLOBALS['paymos_whmcs_local_api']) ? $GLOBALS['paymos_whmcs_local_api'] : null;
+        if (!is_callable($handler)) {
+            return array('result' => 'error', 'message' => 'localAPI is not stubbed in this test.');
+        }
+
+        return $handler((string) $command, is_array($values) ? $values : array());
+    }
+}
+
 // WHMCS defines this before any module file loads; the compile-all gate
 // requires the guarded entry files exactly like the platform does.
 if (!defined('WHMCS')) {
@@ -157,6 +172,7 @@ function whmcs_signed_header($secret, $body, $timestamp)
 
 function paymos_whmcs_reset_test_state()
 {
+    unset($GLOBALS['paymos_whmcs_local_api']);
     if (class_exists('PaymosWhmcs\\Config') && method_exists('PaymosWhmcs\\Config', 'resetForTests')) {
         PaymosWhmcs\Config::resetForTests();
     }
@@ -203,8 +219,27 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
     /** @var array<string, bool> */
     public $transactions = array();
 
+    /**
+     * The currency each WHMCS invoice is kept in — the client's currency. The
+     * GetInvoice response carries no currency field, so it lives here and not
+     * in $invoices.
+     *
+     * @var array<int, string>
+     */
+    public $invoiceCurrencies = array(42 => 'USD', 43 => 'USD');
+
     /** @var bool */
     public $failNextTransactionCheck = false;
+
+    /**
+     * WHMCS's checkCbInvoiceID/checkCbTransID end the process with die() on an
+     * unknown invoice or a known transaction. When this flag is on, calling them
+     * raises an \Error the reconciler's catch cannot swallow — the test double
+     * for "the cron process just died".
+     *
+     * @var bool
+     */
+    public $callbackHelpersDie = false;
 
     public function __construct()
     {
@@ -212,13 +247,16 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
             'invoiceid' => '42',
             'total' => '100.00',
             'balance' => '100.00',
-            'currency' => 'USD',
+            'userid' => '77',
             'status' => 'Unpaid',
         );
     }
 
     public function checkInvoiceId($invoiceId, $gatewayModuleName)
     {
+        if ($this->callbackHelpersDie) {
+            throw new Error('checkCbInvoiceID() called outside a callback: the process would die here.');
+        }
         $invoiceId = (int) $invoiceId;
         if (!isset($this->invoices[$invoiceId])) {
             throw new RuntimeException('Invalid invoice id.');
@@ -229,6 +267,9 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
 
     public function checkTransactionId($transactionId)
     {
+        if ($this->callbackHelpersDie) {
+            throw new Error('checkCbTransID() called outside a callback: the process would die here.');
+        }
         $transactionId = (string) $transactionId;
         if ($this->failNextTransactionCheck || isset($this->transactions[$transactionId])) {
             $this->failNextTransactionCheck = false;
@@ -262,5 +303,20 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
     {
         $invoiceId = (int) $invoiceId;
         return isset($this->invoices[$invoiceId]) ? $this->invoices[$invoiceId] : array();
+    }
+
+    public function invoiceCurrency($invoiceId)
+    {
+        $invoiceId = (int) $invoiceId;
+        if (!isset($this->invoiceCurrencies[$invoiceId])) {
+            throw new RuntimeException('WHMCS did not report the invoice currency.');
+        }
+
+        return $this->invoiceCurrencies[$invoiceId];
+    }
+
+    public function transactionExists($transactionId)
+    {
+        return isset($this->transactions[(string) $transactionId]);
     }
 }

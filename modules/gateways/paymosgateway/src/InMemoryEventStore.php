@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace PaymosWhmcs;
 
-use Paymos\Webhook\EventStoreInterface;
+use Paymos\Webhook\CommitAwareEventStoreInterface;
 
-final class InMemoryEventStore implements EventStoreInterface
+final class InMemoryEventStore implements CommitAwareEventStoreInterface
 {
     /** @var array<string, bool> */
     private $committed = array();
@@ -23,6 +23,11 @@ final class InMemoryEventStore implements EventStoreInterface
 
         $this->pending = $eventId;
         return true;
+    }
+
+    public function isCommitted($eventId)
+    {
+        return isset($this->committed[(string) $eventId]);
     }
 
     public function commit()
