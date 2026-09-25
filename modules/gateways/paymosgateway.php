@@ -30,39 +30,7 @@ function paymosgateway_link($params)
         \PaymosWhmcs\Migrations::ensure();
 
         return (new \PaymosWhmcs\GatewayLink(new \PaymosWhmcs\InvoiceStore()))->render($params);
-    } catch (\Paymos\Exception\ApiException $e) {
-        // A structured API error (e.g. an unsupported currency → 400 validation)
-        // carries an actionable detail/field. Surface it instead of the generic
-        // "temporarily unavailable" message, and log the specifics so the admin
-        // can see exactly which field the server rejected.
-        if (function_exists('logTransaction')) {
-            logTransaction('paymosgateway', array(
-                'error' => $e->getMessage(),
-                'code' => $e->errorCode(),
-                'field' => $e->field(),
-                'detail' => $e->detail(),
-            ), 'Error');
-        }
-
-        // The API's detail is English. On a store that reads another language it
-        // would sit inside a translated page, so prefer our own localized line.
-        $detail = $e->detail();
-        if ($detail === null || $detail === '' || !\PaymosWhmcs\Translation::isEnglish($params)) {
-            $detail = \PaymosWhmcs\Translation::text('payment_cannot_be_used', $params);
-        }
-        $field = $e->field();
-        if ($field !== null && $field !== '') {
-            $detail .= ' (' . $field . ')';
-        }
-
-        return '<div class="alert alert-danger">' . htmlspecialchars($detail, ENT_QUOTES, 'UTF-8') . '</div>';
     } catch (\Throwable $e) {
-        if (function_exists('logTransaction')) {
-            logTransaction('paymosgateway', array('error' => $e->getMessage()), 'Error');
-        }
-
-        return '<div class="alert alert-danger">'
-            . htmlspecialchars(\PaymosWhmcs\Translation::text('payment_unavailable', $params), ENT_QUOTES, 'UTF-8')
-            . '</div>';
+        return \PaymosWhmcs\GatewayLink::failureNotice($e, $params);
     }
 }
