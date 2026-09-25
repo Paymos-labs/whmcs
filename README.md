@@ -142,8 +142,12 @@ compares the approval response against it, so a mismatch there is also what make
 previously working connection stop.
 
 **The client paid and the invoice is still Unpaid.** Look in the Gateway Log first.
-`Manual review` means the invoice amount changed after the Paymos invoice was
-created — reconcile it by hand. `Snapshot mismatch` means the stored record and the
+`Manual review` has two causes, and the entry's text tells them apart. Either the
+invoice amount changed after the Paymos invoice was created, or the amount due,
+the mode or the project changed while the old Paymos invoice was already paid,
+still payable, or could not be read. In the second case no new invoice is issued
+and the client is asked to contact you, so check the old invoice in the Paymos
+dashboard first. Reconcile either case by hand. `Snapshot mismatch` means the stored record and the
 live invoice disagree, and nothing will be applied until they do.
 
 **Nothing at all in the Gateway Log.** Then the callback never arrived. Request the
