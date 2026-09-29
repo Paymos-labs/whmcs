@@ -8,6 +8,102 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.3.17] - 2026-09-29
+
+- chore: bundle Paymos PHP SDK v1.5.0
+
+### Fixed
+- When the invoice page could not replace the Paymos invoice because the old
+  one may still be paid (BUG-166), the client read "Paymos is temporarily
+  unavailable. Please contact support." and could pick another gateway for the
+  same invoice (BUG-180). That case now shows the new `replacement_blocked`
+  line, the SDK's buyer message, in all six catalogues, and no longer writes a second `Error` entry to the
+  gateway log beside the `Manual review` one. The failure notices moved from
+  `paymosgateway_link()` into `GatewayLink::failureNotice()`, unchanged for
+  every other failure.
+- A changed order could leave its old invoice payable beside the new one
+  (BUG-166). When the amount due, the mode or the project changed, the
+  checkout cut a new invoice and left the old one open on Paymos, so a buyer
+  could pay both. The old invoice is now cancelled first, in its own
+  environment, through the SDK's `InvoiceReplacement`; the new one is cut only
+  after that cancel succeeds or Paymos reports the old one expired, cancelled
+  or underpaid. When the old invoice is paid, still payable (network picked,
+  funds confirming, part paid) or cannot be read — a 404 included — no new
+  invoice is cut and a `Manual review` entry naming the old invoice goes to
+  the gateway log. A 404 on the read of the live invoice no longer cuts a new
+  one either.
+- Four of the six shipped catalogues were unreachable. The language resolver
+  answered exactly two things — `russian` or `english` — so `german.php`,
+  `spanish.php`, `turkish.php` and `chinese.php` sat in the package and were
+  never read; a German store showed English. It now accepts both WHMCS's English
+  language names and ISO codes, and returns only a language we ship a catalogue
+  for.
+- The gateway fee was booked in the wrong unit. `data.payment.fee` is
+  denominated in the paid token (USDT/USDC), and it went into
+  `addInvoicePayment` as if it were the invoice currency: a 9000 RUB invoice
+  paid with 100 USDT and a 1 USDT fee recorded a 1.00 RUB fee instead of about
+  90 RUB. The fee is now converted at `data.payment.exchange_rate`; when the
+  token and the invoice currency are the same it is taken as is, and when it
+  cannot be converted the module records 0.00.
+- The reconciler could end the whole WHMCS cron. It ran inside `AfterCronJob`
+  through `checkCbInvoiceID()` and `checkCbTransID()`, which end the process
+  with `die()` on an unknown invoice or an already-recorded transaction: one
+  deleted WHMCS invoice stopped every later row, and every later `AfterCronJob`
+  hook, on each run for a day. The cron path now looks the invoice up through
+  `GetInvoice` and the transaction in `tblaccounts`, closes the row of a deleted
+  invoice so it is not fetched again, and no longer lets one failing row stop
+  the rest.
+- A payment on a partly paid invoice went to manual review. WHMCS hands the
+  module the amount still due, so after 40.00 of a 100.00 invoice was paid the
+  Paymos invoice was cut for 60.00 — and the callback then compared that 60.00
+  with the 100.00 total and refused it. The snapshot now keeps the WHMCS total
+  next to the amount due: the total is checked against the current total, the
+  charge against the payment, and WHMCS is credited with what the Paymos
+  invoice charged.
+- A late non-final webhook could reopen a finished order. Webhooks are
+  delivered at least once and in no particular order, and only paid orders were
+  guarded: an `invoice.underpaid_waiting` or `invoice.confirming` arriving after
+  the invoice had already ended underpaid, expired or cancelled moved the order
+  back into an open state. Nothing leaves a final status on the server, so once
+  one is recorded for an invoice every later event for it is ignored and the
+  final status stays recorded.
+- The pay button could lead to an expired invoice forever. A Paymos invoice
+  lives 30 minutes from the moment it is cut, and a WHMCS invoice is often paid
+  days after it is first viewed; the module kept handing back the same link
+  while the amount, currency, project and environment matched. It now reads
+  the live invoice before reusing the link and cuts a new one when the old one
+  ended unpaid or expired. A paid invoice keeps its link.
+- A webhook retry that arrived while the first delivery was still being
+  processed was answered 200 "duplicate". Paymos gives a delivery 10 seconds and
+  retries, while a slow reverse-verification call can take longer; the retry was
+  acknowledged as delivered, and if the first attempt then failed the event was
+  lost. An event that is only locked, not yet committed, is now answered 409 so
+  Paymos tries again, and the lock the first delivery holds is left alone.
+- With "Convert To For Processing" set, a payment was credited in the wrong
+  currency. WHMCS converts the amount before the module sees it, so a 100.00 EUR
+  invoice was charged as 108.00 USD, and the callback credited 108.00 to the EUR
+  invoice; the fee was converted into USD and booked as EUR. The module now reads
+  the invoice currency from the client (`GetClientsDetails`, `currency_code`) and
+  sends a payment charged in any other currency to manual review. When WHMCS
+  cannot report the currency, nothing is recorded and the webhook or the next
+  cron run tries again.
+- The reconciler closed a row for good on any `GetInvoice` failure. A database
+  or API error was read as a deleted invoice, so a paid invoice stopped being
+  reconciled after one bad cron run. The row is now closed only when WHMCS
+  answers `Invoice ID Not Found`; on any other error it stays for the next run.
+- An invoice nobody started is replaced only once its deadline is five minutes
+  behind the store's clock (`InvoiceRenewal::CLOCK_SKEW_SECONDS` in the bundled
+  SDK). The deadline is the server's, and a store clock running ahead could cut
+  a second invoice while the buyer could still pick a network on the first.
+  Normally the server marks such an invoice expired within seconds, and that
+  status decides first.
+
+### Changed
+- Whether to surface the API's English error detail is decided by
+  `Translation::isEnglish()` instead of comparing the pay button's label against
+  its English text — a coupling that would have leaked raw English into a
+  translated page the moment one catalogue left that label untranslated.
+
 ## [1.3.16] - 2026-09-26
 
 - chore: bundle Paymos PHP SDK v1.4.4
