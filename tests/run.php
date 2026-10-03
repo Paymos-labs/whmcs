@@ -55,6 +55,7 @@ require __DIR__ . '/TranslationTest.php';
 require __DIR__ . '/GatewayLinkTest.php';
 require __DIR__ . '/EventStoreTest.php';
 require __DIR__ . '/CallbackProcessorTest.php';
+require __DIR__ . '/CrashRecoveryTest.php';
 require __DIR__ . '/ReconcilerTest.php';
 
 $count = 0;

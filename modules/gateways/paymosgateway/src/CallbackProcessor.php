@@ -137,6 +137,19 @@ final class CallbackProcessor
      */
     private function applyEventToWhmcs(WebhookEvent $event, $environment, array $row, array $gatewayParams, $reverseVerify, $fromCron)
     {
+        // Deleted invoices cannot receive money and need no database payment lock.
+        if ($fromCron && count($this->whmcs->getInvoice((int) $row['whmcs_invoice_id'])) === 0) {
+            $this->invoiceStore->updateStatus((string) $row['paymos_invoice_id'], InvoiceStore::STATUS_WHMCS_INVOICE_MISSING);
+            $this->whmcs->logTransaction($this->gatewayName($gatewayParams), $event->toArray(), 'Reconcile: WHMCS invoice not found');
+            return false;
+        }
+        return $this->whmcs->withInvoiceLock((int) $row['whmcs_invoice_id'], function () use ($event, $environment, $row, $gatewayParams, $reverseVerify, $fromCron) {
+            return $this->applyLockedEventToWhmcs($event, $environment, $row, $gatewayParams, $reverseVerify, $fromCron);
+        });
+    }
+
+    private function applyLockedEventToWhmcs(WebhookEvent $event, $environment, array $row, array $gatewayParams, $reverseVerify, $fromCron)
+    {
         $gatewayName = $this->gatewayName($gatewayParams);
         if ($fromCron) {
             $whmcsInvoiceId = (int) $row['whmcs_invoice_id'];
@@ -181,7 +194,7 @@ final class CallbackProcessor
         $rowIsFinal = StatusMapper::isFinalStatus(isset($row['status']) ? (string) $row['status'] : '');
         if ($this->invoiceIsPaid($currentInvoice) && $this->isCompleteOrDowngrade($action)) {
             if (!$rowIsFinal) {
-                $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+                $this->invoiceStore->updateStatus($event->invoiceId(), 'paid');
             }
             $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (invoice already paid)');
             return false;
@@ -204,10 +217,9 @@ final class CallbackProcessor
             ? strtoupper(trim((string) $this->whmcs->invoiceCurrency($whmcsInvoiceId)))
             : '';
 
-        $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
-        $this->whmcs->logTransaction($gatewayName, $event->toArray(), $event->status() === '' ? $action : $event->status());
-
         if ($action !== StatusMapper::ACTION_PAYMENT_COMPLETE) {
+            $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), $event->status() === '' ? $action : $event->status());
             return false;
         }
 
@@ -246,6 +258,7 @@ final class CallbackProcessor
             // not a transient failure — the figures won't change on redelivery. Do
             // not throw into the retry path (that 400s and the server retries
             // forever); hold the invoice for manual review and acknowledge (200).
+            $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
             $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Manual review: ' . AmountGuard::mismatchSummary(
                 $currencyMatches && $chargeMatches ? $expectedTotal : $row['amount'],
                 $row['currency'],
@@ -258,17 +271,19 @@ final class CallbackProcessor
         }
 
         $transactionId = $this->transactionId($event);
-        if ($fromCron) {
-            if ($this->whmcs->transactionExists($transactionId)) {
-                $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (transaction already recorded)');
-                return false;
-            }
-        } else {
+        if ($this->whmcs->transactionExists($transactionId)) {
+            $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (transaction already recorded)');
+            return false;
+        }
+        if (!$fromCron) {
             $this->whmcs->checkTransactionId($transactionId);
         }
         // Credit what the Paymos invoice charged (reverse-verified above), not the
         // WHMCS total: after a partial payment the total would over-credit.
         $this->whmcs->addInvoicePayment($whmcsInvoiceId, $transactionId, $this->amount($row['amount']), $this->paymentFee($event, $invoiceCurrency), $gatewayName);
+        $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+        $this->whmcs->logTransaction($gatewayName, $event->toArray(), $event->status() === '' ? $action : $event->status());
         return true;
     }
 
