@@ -207,6 +207,24 @@ function whmcs_invoice_event($eventId, $eventType, $status, array $overrides = a
 
 final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
 {
+    public $beforePayment = null;
+    private $lockedInvoices = array();
+
+    public function withInvoiceLock($invoiceId, callable $action)
+    {
+        if (isset($this->lockedInvoices[$invoiceId])) {
+            throw new RuntimeException('Invoice payment is in progress.');
+        }
+        $this->lockedInvoices[$invoiceId] = true;
+        try {
+            return $action();
+        } finally {
+            unset($this->lockedInvoices[$invoiceId]);
+        }
+    }
+
+    public $failBeforePayment = false;
+    public $failAfterPayment = false;
     /** @var array<int, array<string, string>> */
     public $invoices = array();
 
@@ -276,11 +294,19 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
             throw new RuntimeException('Duplicate transaction id.');
         }
 
-        $this->transactions[$transactionId] = true;
     }
 
     public function addInvoicePayment($invoiceId, $transactionId, $paymentAmount, $paymentFee, $gatewayModuleName)
     {
+        if ($this->beforePayment !== null) {
+            $callback = $this->beforePayment;
+            $this->beforePayment = null;
+            $callback();
+        }
+        if ($this->failBeforePayment) {
+            $this->failBeforePayment = false;
+            throw new RuntimeException('Failure before CMS payment');
+        }
         $this->payments[] = array(
             'invoice_id' => (int) $invoiceId,
             'transaction_id' => (string) $transactionId,
@@ -288,6 +314,13 @@ final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
             'fee' => (string) $paymentFee,
             'gateway' => (string) $gatewayModuleName,
         );
+        $this->transactions[(string) $transactionId] = true;
+        $this->invoices[(int) $invoiceId]['status'] = 'Paid';
+        $this->invoices[(int) $invoiceId]['balance'] = '0.00';
+        if ($this->failAfterPayment) {
+            $this->failAfterPayment = false;
+            throw new RuntimeException('Failure after CMS payment');
+        }
     }
 
     public function logTransaction($gatewayModuleName, array $data, $status)

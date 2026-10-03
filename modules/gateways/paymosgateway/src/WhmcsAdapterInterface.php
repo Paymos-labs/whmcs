@@ -6,6 +6,9 @@ namespace PaymosWhmcs;
 
 interface WhmcsAdapterInterface
 {
+    /** Serialize callback and cron against the same WHMCS invoice. */
+    public function withInvoiceLock($invoiceId, callable $action);
+
     public function checkInvoiceId($invoiceId, $gatewayModuleName);
 
     public function checkTransactionId($transactionId);

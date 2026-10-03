@@ -6,6 +6,28 @@ namespace PaymosWhmcs;
 
 final class WhmcsAdapter implements WhmcsAdapterInterface
 {
+    public function withInvoiceLock($invoiceId, callable $action)
+    {
+        if (!class_exists('\\WHMCS\\Database\\Capsule')) {
+            throw new \RuntimeException('WHMCS database is unavailable.');
+        }
+        // Named locks belong to one MySQL session. Always use the same writer
+        // PDO, including on WHMCS installations with read replicas configured.
+        $pdo = \WHMCS\Database\Capsule::connection()->getPdo();
+        $name = 'paymos-whmcs-invoice:' . (int) $invoiceId;
+        $acquire = $pdo->prepare('SELECT GET_LOCK(?, 10)');
+        $acquire->execute(array($name));
+        if ((int) $acquire->fetchColumn() !== 1) {
+            throw new \RuntimeException('WHMCS invoice payment is being processed; retry later.');
+        }
+        try {
+            return $action();
+        } finally {
+            $release = $pdo->prepare('SELECT RELEASE_LOCK(?)');
+            $release->execute(array($name));
+        }
+    }
+
     public function checkInvoiceId($invoiceId, $gatewayModuleName)
     {
         if (!function_exists('checkCbInvoiceID')) {
