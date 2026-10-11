@@ -204,6 +204,25 @@ final class CallbackProcessor
         // event that arrives after one is an out-of-order redelivery. Recording it
         // would reopen the row — putting it back into the reconciler's window —
         // and log a status the invoice left long ago.
+
+        // invoice-late-payment: money crossed the invoice's total AFTER it closed. The WHMCS invoice
+        // keeps its decision — one gateway log entry plus a per-invoice marker in the row store,
+        // decided BEFORE the stale-after-final guard below (a late event arrives after a terminal
+        // status by definition). No payment, status or stock action; the marker makes a sequential
+        // duplicate or a redelivery silent.
+        if ($action === StatusMapper::ACTION_NOTE_PAID_LATE) {
+            if (!empty($row['paid_late_noted'])) {
+                $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (paid-late already noted)');
+                return false;
+            }
+
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Paid after the deadline: '
+                . ($event->paidLateAt() !== null ? (string) $event->paidLateAt() : $event->invoiceId()));
+            $row['paid_late_noted'] = $event->id() !== '' ? $event->id() : '1';
+            $this->invoiceStore->save($row);
+            return false;
+        }
+
         if ($rowIsFinal) {
             $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (stale status after a final one)');
             return false;
