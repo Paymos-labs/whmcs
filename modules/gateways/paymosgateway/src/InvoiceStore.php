@@ -76,6 +76,10 @@ final class InvoiceStore implements InvoiceStoreInterface
             'renew_count' => isset($row['renew_count']) ? (int) $row['renew_count'] : 0,
             'updated_at' => $now,
         );
+        // Written only by the callback that set it; other saves leave the marker alone.
+        if (array_key_exists('paid_late_noted', $row)) {
+            $data['paid_late_noted'] = $row['paid_late_noted'] === null ? null : (string) $row['paid_late_noted'];
+        }
 
         $existing = \WHMCS\Database\Capsule::table(Migrations::INVOICES_TABLE)
             ->where('external_order_id', $data['external_order_id'])
