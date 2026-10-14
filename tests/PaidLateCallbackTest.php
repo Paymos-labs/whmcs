@@ -46,7 +46,7 @@ function test_whmcs_paid_late_notes_once_and_never_pays()
     assertSameValue(0, count($adapter->payments), 'paid_late must never add a WHMCS payment.');
     $noted = 0;
     foreach ($adapter->logs as $log) {
-        if (strpos($log['status'], 'Paid after the deadline') === 0) {
+        if (strpos($log['status'], 'Paymos: the customer finished paying for this order after the invoice closed.') === 0) {
             $noted++;
         }
     }
@@ -75,7 +75,7 @@ function test_whmcs_paid_late_sequential_duplicate_is_silent()
     assertSameValue(0, count($adapter->payments), 'duplicates never pay.');
     $noted = 0;
     foreach ($adapter->logs as $log) {
-        if (strpos($log['status'], 'Paid after the deadline') === 0) {
+        if (strpos($log['status'], 'Paymos: the customer finished paying for this order after the invoice closed.') === 0) {
             $noted++;
         }
     }

@@ -216,8 +216,8 @@ final class CallbackProcessor
                 return false;
             }
 
-            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Paid after the deadline: '
-                . ($event->paidLateAt() !== null ? (string) $event->paidLateAt() : $event->invoiceId()));
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Paymos: the customer finished paying for this order after the invoice closed. Check stock, then fulfil the order manually or refund the payment. Invoice: '
+                . $event->invoiceId());
             $row['paid_late_noted'] = $event->id() !== '' ? $event->id() : '1';
             $this->invoiceStore->save($row);
             return false;

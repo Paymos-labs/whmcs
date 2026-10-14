@@ -31,6 +31,7 @@ final class Migrations
                 $table->text('payment_url');
                 $table->string('status', 64)->index();
                 $table->integer('renew_count')->unsigned()->default(0);
+                $table->string('paid_late_noted', 128)->nullable();
                 $table->timestamp('created_at')->nullable();
                 $table->timestamp('updated_at')->nullable();
             });
@@ -41,6 +42,13 @@ final class Migrations
         if (!$schema->hasColumn(self::INVOICES_TABLE, 'invoice_total')) {
             $schema->table(self::INVOICES_TABLE, static function ($table) {
                 $table->string('invoice_total', 64)->nullable();
+            });
+        }
+
+        // invoice-late-payment: the paid-late marker survives redelivery and restarts.
+        if (!$schema->hasColumn(self::INVOICES_TABLE, 'paid_late_noted')) {
+            $schema->table(self::INVOICES_TABLE, static function ($table) {
+                $table->string('paid_late_noted', 128)->nullable();
             });
         }
 
