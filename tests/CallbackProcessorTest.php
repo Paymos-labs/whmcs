@@ -21,6 +21,7 @@ function test_whmcs_callback_rejects_paid_webhook_when_reverse_api_status_differ
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'expired',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -63,6 +64,7 @@ function test_whmcs_callback_applies_paid_webhook_once()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -99,6 +101,7 @@ function test_whmcs_callback_does_not_double_pay_on_second_complete_event()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => $status,
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array());
     };
@@ -135,6 +138,7 @@ function test_whmcs_callback_does_not_downgrade_paid_invoice_on_late_cancel()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'cancelled',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -169,6 +173,7 @@ function test_whmcs_callback_uses_total_currencycode_and_webhook_fee()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -205,6 +210,7 @@ function test_whmcs_callback_does_not_commit_event_id_when_processing_fails()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'expired',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -213,6 +219,7 @@ function test_whmcs_callback_does_not_commit_event_id_when_processing_fails()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -298,6 +305,7 @@ function test_whmcs_callback_converts_token_fee_into_invoice_currency()
         'invoice_id' => 'inv_123',
         'project_id' => 'prj_123',
         'status' => 'paid',
+        'is_test' => true,
         'order' => array('external_id' => 'whmcs_42_0', 'amount' => '9000.00', 'currency' => 'RUB'),
         'payment' => $payment,
     );
@@ -331,6 +339,7 @@ function test_whmcs_callback_books_zero_fee_when_it_cannot_be_converted()
         'invoice_id' => 'inv_123',
         'project_id' => 'prj_123',
         'status' => 'paid',
+        'is_test' => true,
         'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
     );
     $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), new MockTransport(array(
@@ -373,6 +382,7 @@ function test_whmcs_callback_books_a_paid_balance_after_a_partial_payment()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '60', 'currency' => 'USD'),
         )), array()),
     )));
@@ -414,6 +424,7 @@ function test_whmcs_callback_holds_payment_when_the_invoice_total_changed_since_
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '60', 'currency' => 'USD'),
         )), array()),
     )));
@@ -506,6 +517,7 @@ function whmcs_converted_currency_fixture()
         'invoice_id' => 'inv_123',
         'project_id' => 'prj_123',
         'status' => 'paid',
+        'is_test' => true,
         'order' => array('external_id' => 'whmcs_42_0', 'amount' => '108', 'currency' => 'USD'),
         'payment' => array('currency' => 'USDT', 'network' => 'TRC20', 'exchange_rate' => '1', 'fee' => '1'),
     );
@@ -566,6 +578,7 @@ function test_whmcs_callback_retries_when_the_invoice_currency_is_unknown()
         'invoice_id' => 'inv_123',
         'project_id' => 'prj_123',
         'status' => 'paid',
+        'is_test' => true,
         'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100.00', 'currency' => 'USD'),
     );
     $calls = 0;

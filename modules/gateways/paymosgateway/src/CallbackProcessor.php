@@ -265,12 +265,9 @@ final class CallbackProcessor
             $event->orderAmount(),
             $event->orderCurrency()
         );
-        $invoiceUnchanged = AmountGuard::isSafeToComplete(
-            $expectedTotal,
-            $invoiceCurrency,
-            $currentAmount,
-            $invoiceCurrency
-        );
+        // This compares the local invoice total, not a second payment proof.
+        // The complete signed charge evidence is checked separately above.
+        $invoiceUnchanged = AmountGuard::amountsEqual($expectedTotal, $currentAmount);
 
         if (!$currencyMatches || !$chargeMatches || !$invoiceUnchanged) {
             // A currency or amount mismatch on a reverse-verified paid invoice is

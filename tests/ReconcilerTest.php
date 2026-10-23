@@ -18,6 +18,7 @@ function test_whmcs_reconciler_applies_missed_paid_invoice()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             // Server trims trailing zeros: snapshot stored "100.00", API returns "100".
             // The reconciler must treat these as equal (decimal-safe), not skip the
             // invoice on a raw string mismatch.
@@ -45,6 +46,7 @@ function test_whmcs_reconciler_skips_snapshot_mismatch()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '80.00', 'currency' => 'USD'),
         )), array()),
     ));
@@ -90,6 +92,7 @@ function test_whmcs_reconciler_never_calls_the_dying_callback_helpers()
             'invoice_id' => $invoiceId,
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_' . $whmcsId . '_0', 'amount' => '100', 'currency' => 'USD'),
         )), array());
     };
@@ -125,6 +128,7 @@ function test_whmcs_reconciler_skips_a_payment_whmcs_already_booked()
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
         )), array()),
     )));
@@ -166,6 +170,7 @@ function whmcs_reconcile_with_local_api(callable $getInvoice)
             'invoice_id' => 'inv_123',
             'project_id' => 'prj_123',
             'status' => 'paid',
+            'is_test' => true,
             'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
         )), array()),
     )));
