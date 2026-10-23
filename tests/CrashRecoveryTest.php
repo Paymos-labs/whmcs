@@ -32,7 +32,7 @@ function test_whmcs_paid_recovers_before_and_after_cms_commit()
             new PaymosWhmcs\InMemoryEventStore(), static function () {
                 return new Paymos\Client(new Paymos\ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'),
                     new Paymos\Http\MockTransport(array(new Paymos\Http\HttpResponse(200, json_encode(array(
-                        'invoice_id' => 'inv_123', 'project_id' => 'prj_123', 'status' => 'paid',
+                        'invoice_id' => 'inv_123', 'project_id' => 'prj_123', 'status' => 'paid', 'is_test' => true,
                         'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
                     )), array()))));
             });
