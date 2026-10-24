@@ -478,8 +478,10 @@ function test_whmcs_callback_answers_409_while_the_event_is_still_being_processe
     assertSameValue(0, count($adapter->payments), 'nothing may be applied while the event is in flight.');
 }
 
-function test_whmcs_event_store_without_capsule_tells_a_locked_event_from_a_committed_one()
+function test_whmcs_event_store_tells_a_locked_event_from_a_committed_one()
 {
+    // Runs against the fake Capsule table state EventStoreTest installs (the
+    // dedicated stale-owner scenarios live there too).
     $store = new PaymosWhmcs\EventStore();
     assertTrueValue($store->remember('evt_mem', 604800), 'first delivery takes the lock.');
     assertFalseValue($store->isCommitted('evt_mem'), 'locked only: not committed.');

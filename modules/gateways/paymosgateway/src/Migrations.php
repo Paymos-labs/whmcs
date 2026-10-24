@@ -55,9 +55,25 @@ final class Migrations
         if (!$schema->hasTable(self::EVENTS_TABLE)) {
             $schema->create(self::EVENTS_TABLE, static function ($table) {
                 $table->string('event_id', 128)->primary();
+                $table->string('owner_token', 32)->default('');
                 $table->integer('expires_at')->unsigned()->index();
                 $table->integer('created_at')->unsigned();
             });
+        }
+
+        // Tables created before the owner-token reservation fix (A10-02) lack
+        // the `owner_token` column. Old rows keep '' and never match a live
+        // owner token, so they simply expire via their reservation TTL (<=300s)
+        // — no data migration is needed, and the takeover window closes itself.
+        if ($schema->hasTable(self::EVENTS_TABLE) && !$schema->hasColumn(self::EVENTS_TABLE, 'owner_token')) {
+            try {
+                $schema->table(self::EVENTS_TABLE, static function ($table) {
+                    $table->string('owner_token', 32)->default('');
+                });
+            } catch (\Throwable $e) {
+                // An installation whose ALTER failed keeps working until the
+                // next request retries it; expired rows still age out by TTL.
+            }
         }
     }
 }

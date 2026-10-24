@@ -176,6 +176,11 @@ function paymos_whmcs_reset_test_state()
     if (class_exists('PaymosWhmcs\\Config') && method_exists('PaymosWhmcs\\Config', 'resetForTests')) {
         PaymosWhmcs\Config::resetForTests();
     }
+    // EventStoreTest defines a fake WHMCS\Database\Capsule for the whole run;
+    // its table state must not leak between tests.
+    if (class_exists('FakeWhmcsCapsuleState')) {
+        FakeWhmcsCapsuleState::reset();
+    }
 }
 
 function paymos_whmcs_write_generated_config($php)

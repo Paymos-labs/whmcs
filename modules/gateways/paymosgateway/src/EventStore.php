@@ -21,6 +21,17 @@ final class EventStore implements CommitAwareEventStoreInterface
     /** @var string */
     private $pendingEventId = '';
 
+    /**
+     * Owner token of the reservation remember() took (A10-02). Each successful
+     * remember() mints a fresh random token; commit()/release() match it in
+     * their WHERE clause, so a delivery whose reservation expired (and whose
+     * event id was taken over by a newer delivery) can no longer delete or
+     * commit the successor's row.
+     *
+     * @var string
+     */
+    private $pendingOwnerToken = '';
+
     /** @var int */
     private $pendingTtlSeconds = 0;
 
@@ -43,9 +54,12 @@ final class EventStore implements CommitAwareEventStoreInterface
             return false;
         }
 
+        $ownerToken = bin2hex(random_bytes(16));
+
         try {
             \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)->insert(array(
                 'event_id' => $eventId,
+                'owner_token' => $ownerToken,
                 'expires_at' => $now + self::RESERVATION_SECONDS,
                 'created_at' => $now,
             ));
@@ -54,6 +68,7 @@ final class EventStore implements CommitAwareEventStoreInterface
         }
 
         $this->pendingEventId = $eventId;
+        $this->pendingOwnerToken = $ownerToken;
         $this->pendingTtlSeconds = (int) $ttlSeconds;
 
         return true;
@@ -84,25 +99,44 @@ final class EventStore implements CommitAwareEventStoreInterface
         return $expiresAt > time() && $expiresAt > $createdAt + self::RESERVATION_SECONDS;
     }
 
+    /**
+     * Extend the reservation to the full dedup window — but only if this store
+     * instance still owns it. Zero affected rows mean a newer delivery took the
+     * event id over after this reservation expired (A10-02): that successor's
+     * row must stay untouched, and the commit is reported as not owned (false),
+     * not as an error.
+     *
+     * @return bool True when this owner's row was extended; false when nothing
+     *              was pending or the reservation was lost to a successor.
+     */
     public function commit()
     {
         if (!$this->hasCapsule()) {
-            $this->fallback()->commit();
-            return;
+            return $this->fallback()->commit();
         }
 
         if ($this->pendingEventId === '') {
-            return;
+            return false;
         }
 
-        \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)
+        $affected = \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)
             ->where('event_id', $this->pendingEventId)
+            ->where('owner_token', $this->pendingOwnerToken)
             ->update(array('expires_at' => time() + $this->pendingTtlSeconds));
 
         $this->pendingEventId = '';
+        $this->pendingOwnerToken = '';
         $this->pendingTtlSeconds = 0;
+
+        return (int) $affected > 0;
     }
 
+    /**
+     * Drop the in-flight lock so the server can retry a failed processing run.
+     * Only this owner's row is deleted: when the reservation expired and a
+     * newer delivery owns the event id now, release() completes silently and
+     * leaves the successor's row alone (A10-02).
+     */
     public function release()
     {
         if (!$this->hasCapsule()) {
@@ -116,9 +150,11 @@ final class EventStore implements CommitAwareEventStoreInterface
 
         \WHMCS\Database\Capsule::table(Migrations::EVENTS_TABLE)
             ->where('event_id', $this->pendingEventId)
+            ->where('owner_token', $this->pendingOwnerToken)
             ->delete();
 
         $this->pendingEventId = '';
+        $this->pendingOwnerToken = '';
         $this->pendingTtlSeconds = 0;
     }
 

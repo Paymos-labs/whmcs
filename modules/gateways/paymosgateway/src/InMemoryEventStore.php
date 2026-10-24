@@ -30,14 +30,20 @@ final class InMemoryEventStore implements CommitAwareEventStoreInterface
         return isset($this->committed[(string) $eventId]);
     }
 
+    /**
+     * @return bool True when a pending reservation was committed; false when
+     *              nothing was pending (nothing to commit).
+     */
     public function commit()
     {
         if ($this->pending === '') {
-            return;
+            return false;
         }
 
         $this->committed[$this->pending] = true;
         $this->pending = '';
+
+        return true;
     }
 
     public function release()
