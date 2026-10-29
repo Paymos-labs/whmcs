@@ -47,12 +47,24 @@ final class CallbackProcessor
      */
     public function handle($rawBody, $signatureHeader, array $gatewayParams, $now = null)
     {
+        $refundDelivery = false;
         try {
             $config = Config::fromParams($gatewayParams);
             $verified = (new MultiEnvironmentWebhookVerifier($config->webhookSecrets(), $this->eventStore))
                 ->process($signatureHeader, $rawBody, $now);
             $environment = $verified->environment();
             $event = $verified->event();
+
+            $data = $event->toArray()['data'] ?? array();
+            if (strpos($event->type(), 'withdrawal.') === 0 && is_array($data)
+                && (($data['type'] ?? '') === 'refund' || !empty($data['invoice_id']))) {
+                $refundDelivery = true;
+                $store = new RefundIntentStore();
+                $store->install();
+                (new RefundAdapter($gatewayParams, $store, $this->clientFactory))->callback($event, $environment);
+                $this->commitEvent();
+                return new CallbackResult(200, 'OK');
+            }
 
             if (!$event->isInvoiceEvent()) {
                 $this->commitEvent();
@@ -68,6 +80,9 @@ final class CallbackProcessor
             $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('duplicate' => true), 'Duplicate');
             return new CallbackResult(200, 'OK', true);
         } catch (EventInProgressException $e) {
+            if ($refundDelivery) {
+                $this->releaseEvent();
+            }
             // Another delivery of this event holds the lock and has not finished.
             // Not a duplicate: a 2xx would mark it delivered even if that delivery
             // then fails. 409 makes the server retry; the lock is not ours to drop.
@@ -82,6 +97,10 @@ final class CallbackProcessor
             return new CallbackResult(500, 'Configuration error');
         } catch (\RuntimeException $e) {
             $this->releaseEvent();
+            if ($e->getMessage() === 'refund_unbound_review') {
+                $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Refund webhook not applied: no matching refund in WHMCS');
+                return new CallbackResult(409, 'No matching refund');
+            }
             $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Error');
             return new CallbackResult(400, 'Processing failed');
         }

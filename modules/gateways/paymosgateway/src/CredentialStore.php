@@ -35,6 +35,22 @@ final class CredentialStore
         ));
     }
 
+    public static function refundConfig($environment)
+    {
+        if (!in_array($environment, array('sandbox', 'live'), true)) {
+            throw new \InvalidArgumentException('refund_environment_invalid');
+        }
+        $credentials = self::loadCredentials();
+        $values = isset($credentials[$environment]) ? $credentials[$environment] : array();
+        return array(
+            'project_id' => isset($values['project_id']) ? $values['project_id'] : '',
+            'capabilities' => CredentialSet::hasCapability($values, 'invoice_refunds_v1')
+                ? array('invoice_refunds_v1') : array(),
+            'refund_contract_version' => isset($values['refund_contract_version']) ? $values['refund_contract_version'] : null,
+            'refunds_enabled' => CredentialSet::refundsEnabled($values),
+        );
+    }
+
     public static function saveState(array $state)
     {
         self::save(self::STATE_KEY, 'paymos-whmcs-connect-state-v1', array(

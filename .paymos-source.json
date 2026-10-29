@@ -1,6 +1,6 @@
 {
   "source_repository": "shockk73/paymos",
   "source_path": "plugins/whmcs-paymos",
-  "source_commit": "40ed2f5ebf9244000f20da39c840140e94c127ec",
-  "version": "1.4.9"
+  "source_commit": "5ab2fafa7f2fe3983c39554568831e05ef345baf",
+  "version": "1.5.0"
 }

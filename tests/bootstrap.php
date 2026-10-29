@@ -2,6 +2,8 @@
 
 declare(strict_types=1);
 
+require_once __DIR__ . '/RefundWiringTest.php';
+
 if (!function_exists('add_hook')) {
     function add_hook($hook, $priority, $function) {}
 }

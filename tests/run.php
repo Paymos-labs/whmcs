@@ -58,6 +58,8 @@ require __DIR__ . '/CallbackProcessorTest.php';
 require __DIR__ . '/PaidLateCallbackTest.php';
 require __DIR__ . '/CrashRecoveryTest.php';
 require __DIR__ . '/ReconcilerTest.php';
+require __DIR__ . '/RefundAdapterTest.php';
+require __DIR__ . '/RefundWriteGuardTest.php';
 
 $count = 0;
 
