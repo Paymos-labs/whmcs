@@ -52,6 +52,11 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
             throw new \RuntimeException('WHMCS add invoice payment helper is unavailable.');
         }
 
+        if ($gatewayModuleName === 'paymosgateway') {
+            return RefundWriteGuard::withPayment($invoiceId, static function () use ($invoiceId, $transactionId, $paymentAmount, $paymentFee, $gatewayModuleName) {
+                return addInvoicePayment($invoiceId, $transactionId, $paymentAmount, $paymentFee, $gatewayModuleName);
+            });
+        }
         return addInvoicePayment($invoiceId, $transactionId, $paymentAmount, $paymentFee, $gatewayModuleName);
     }
 

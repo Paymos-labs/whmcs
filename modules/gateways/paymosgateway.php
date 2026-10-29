@@ -34,3 +34,14 @@ function paymosgateway_link($params)
         return \PaymosWhmcs\GatewayLink::failureNotice($e, $params);
     }
 }
+
+function paymosgateway_refund($params)
+{
+    try {
+        \PaymosWhmcs\Migrations::ensure();
+        (new \PaymosWhmcs\RefundIntentStore())->install();
+        return (new \PaymosWhmcs\RefundAdapter($params))->nativeRefund($params);
+    } catch (\Throwable $error) {
+        return array('status' => 'error', 'rawdata' => array('message' => 'Refund not sent to Paymos: the module could not prepare its tables in the WHMCS database. See reason below.', 'reason' => $error->getMessage()));
+    }
+}

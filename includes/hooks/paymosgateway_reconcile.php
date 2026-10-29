@@ -30,6 +30,29 @@ if (function_exists('add_hook')) {
             new \PaymosWhmcs\WhmcsAdapter()
         ))->run($params);
     });
+
+    add_hook('AfterCronJob', 2, static function () {
+        require_once dirname(__DIR__, 2) . '/modules/gateways/paymosgateway/src/Autoloader.php';
+        \PaymosWhmcs\Autoloader::register();
+
+        if (!function_exists('getGatewayVariables')) {
+            return;
+        }
+        $params = getGatewayVariables('paymosgateway');
+        if (!is_array($params) || empty($params['type'])) {
+            return;
+        }
+        try {
+            \PaymosWhmcs\Migrations::ensure();
+            $store = new \PaymosWhmcs\RefundIntentStore();
+            $store->install();
+            (new \PaymosWhmcs\RefundAdapter($params, $store))->run();
+        } catch (\Throwable $error) {
+            if (function_exists('logTransaction')) {
+                logTransaction('paymosgateway', array('reason' => $error->getMessage()), 'Refund checks did not run (retrying on next cron run)');
+            }
+        }
+    });
 }
 
 function paymosgateway_reconcile_due()
