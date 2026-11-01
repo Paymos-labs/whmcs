@@ -149,7 +149,6 @@ final class GatewayLink
             'amount' => $amount,
             'currency' => $currency,
             'external_order_id' => $externalOrderId,
-            'allow_multiple_payments' => true,
         );
 
         $clientId = $this->clientId($params);
