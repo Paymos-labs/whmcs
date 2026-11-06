@@ -13,7 +13,7 @@ so the amount you billed is the amount that settles.
 
 ## Requirements
 
-- WHMCS 8.13 or 9.0;
+- WHMCS 8.13 through 9.1;
 - PHP 7.4 or later with the `curl`, `hash`, `json` and `openssl` extensions;
 - a System URL on **HTTPS** — connecting is refused over plain HTTP;
 - a Paymos account with the billing project open in the dashboard.
@@ -132,7 +132,32 @@ Missed deliveries are swept up by the WHMCS cron. On `AfterCronJob`, no more oft
 than once every ten minutes, the module takes up to 50 unpaid Paymos invoices from
 the last 24 hours, fetches each one from the API, and runs it through the same path
 a webhook would take — reverse verification, amount guard and already-paid guard all
-still apply.
+still apply. A second `AfterCronJob` hook reconciles pending Paymos refunds.
+
+## Refunds
+
+The module supports two server-calculated refund modes through the Paymos Merchant
+API (`/v1/refunds`): `full` (full invoice refund) and `overpayment` (refund of the
+excess on a `paid_over` invoice). Funds are sent as a new outbound blockchain
+transaction strictly to the verified `first_sender` address recorded by Paymos when
+the invoice was paid — no recipient wallet address is entered manually, and
+arbitrary partial refund amounts are not supported by the protocol.
+
+Administrators with the **Refund Invoice Payments** permission have two entry points
+on a paid Paymos invoice in WHMCS:
+
+- the **Paymos refunds** panel rendered directly on the admin invoice view
+  (`AdminInvoicesControlsOutput`), which offers both `full` and `overpayment`
+  actions and displays the operation state;
+- the native WHMCS invoice **Refund** tab (`paymosgateway_refund`), which submits a
+  `full` refund intent. Because WHMCS has no native "refund in progress" state,
+  `paymosgateway_refund` records the request without booking a premature accounting
+  debit and updates the WHMCS invoice once the Paymos refund reaches `completed`.
+
+Background reconciliation runs on WHMCS `AfterCronJob`
+(`includes/hooks/paymosgateway_reconcile.php`) and syncs in-flight refund intents
+with the Merchant API. In Sandbox mode you can simulate terminal refund outcomes
+(`completed`, `failed`, `cancelled`) before switching to Live.
 
 ## Troubleshooting
 
@@ -154,10 +179,6 @@ live invoice disagree, and nothing will be applied until they do.
 callback URL above from outside your network: it must be reachable without HTTP
 auth, without an IP allowlist, and without a redirect, because redirects are not
 followed.
-
-**Refunding a client.** There is no reversal to issue. Send a withdrawal from your
-Paymos balance to the address you agreed with the client, and record it against the
-invoice in WHMCS the way you would any manual credit.
 
 - [Documentation](https://paymos.io/docs/cms-whmcs)
 - [Source](https://github.com/paymos-labs/whmcs)
