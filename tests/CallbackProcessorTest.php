@@ -10,6 +10,40 @@ use PaymosWhmcs\CallbackProcessor;
 use PaymosWhmcs\InMemoryEventStore;
 use PaymosWhmcs\InMemoryInvoiceStore;
 
+function test_whmcs_callback_classifies_invoice_lock_and_storage_failures()
+{
+    foreach (array(new \PaymosWhmcs\InvoiceBusyException('busy'), new \PaymosWhmcs\InfrastructureException('storage'), new \PDOException('database')) as $error) {
+        $adapter = new FakeWhmcsAdapter();
+        $adapter->lockError = $error;
+        $events = new InMemoryEventStore();
+        $body = json_encode(whmcs_invoice_event('evt_lock_failure', 'invoice.paid', 'paid'));
+        $result = (new CallbackProcessor($adapter, whmcs_store_with_invoice(), $events))->handle(
+            $body, whmcs_signed_header('whsec_sandbox', $body, time()), whmcs_gateway_params());
+        assertSameValue($error instanceof \PaymosWhmcs\InvoiceBusyException ? 409 : 500, $result->statusCode(), 'Failures must retain their HTTP classification.');
+        assertSameValue(0, count($adapter->payments), 'Lock/storage failure must not credit payment.');
+        assertTrueValue($events->remember('evt_lock_failure', 86400), 'A failed delivery must release its own reservation.');
+    }
+}
+
+function test_whmcs_callback_cleanup_failure_preserves_controlled_http_response()
+{
+    foreach (array(new \PaymosWhmcs\InvoiceBusyException('busy'), new \PaymosWhmcs\InfrastructureException('storage')) as $failure) {
+        $adapter = new FakeWhmcsAdapter();
+        $adapter->lockError = $failure;
+        $events = new class implements \Paymos\Webhook\EventStoreInterface {
+            public $releaseAttempts = 0;
+            public function remember($eventId, $ttlSeconds) { return true; }
+            public function release() { $this->releaseAttempts++; throw new PDOException('Database remains unavailable during cleanup.'); }
+        };
+        $body = json_encode(whmcs_invoice_event('evt_cleanup_failure', 'invoice.paid', 'paid'));
+        $result = (new CallbackProcessor($adapter, whmcs_store_with_invoice(), $events))->handle(
+            $body, whmcs_signed_header('whsec_sandbox', $body, time()), whmcs_gateway_params());
+        assertSameValue($failure instanceof \PaymosWhmcs\InvoiceBusyException ? 409 : 500, $result->statusCode(), 'Cleanup must not throw instead of returning the original retryable HTTP response.');
+        assertSameValue(1, $events->releaseAttempts, 'Cleanup is attempted once, never recursively.');
+        assertSameValue(0, count($adapter->payments), 'No native payment can be made without the invoice lock.');
+    }
+}
+
 function test_whmcs_callback_rejects_paid_webhook_when_reverse_api_status_differs()
 {
     $store = whmcs_store_with_invoice();
@@ -436,9 +470,43 @@ function test_whmcs_callback_holds_payment_when_the_invoice_total_changed_since_
         return $client;
     }))->handle($body, whmcs_signed_header('whsec_sandbox', $body, time()), whmcs_gateway_params());
 
-    assertSameValue(200, $result->statusCode(), 'a changed invoice is acknowledged, not retried.');
+    assertSameValue(400, $result->statusCode(), 'A changed invoice remains retryable until reviewed.');
     assertSameValue(0, count($adapter->payments), 'a changed invoice must not be credited automatically.');
-    assertContainsValue('Manual review', $adapter->logs[count($adapter->logs) - 1]['status'], 'a changed invoice must be flagged for manual review.');
+    assertContainsValue('Manual review', $adapter->logs[count($adapter->logs) - 2]['status'], 'a changed invoice must be flagged for manual review.');
+}
+
+function test_whmcs_callback_recovers_same_event_after_amount_or_currency_review()
+{
+    foreach (array('amount', 'currency') as $mismatch) {
+        $store = new InMemoryInvoiceStore();
+        $store->save(array('whmcs_invoice_id' => 42, 'paymos_invoice_id' => 'inv_123',
+            'external_order_id' => 'whmcs_42_0', 'environment' => 'sandbox', 'project_id' => 'prj_123',
+            'amount' => '60.00', 'invoice_total' => '100.00', 'currency' => 'USD',
+            'payment_url' => 'https://checkout.paymos.test/inv_123', 'status' => 'awaiting_client', 'renew_count' => 0));
+        $adapter = new FakeWhmcsAdapter();
+        $adapter->invoices[42]['balance'] = '60.00';
+        if ($mismatch === 'amount') { $adapter->invoices[42]['total'] = '120.00'; }
+        else { $adapter->invoiceCurrencies[42] = 'EUR'; }
+        $event = whmcs_invoice_event('evt_review_' . $mismatch, 'invoice.paid', 'paid',
+            array('data' => array('order' => array('amount' => '60.00'))));
+        $processor = new CallbackProcessor($adapter, $store, new InMemoryEventStore(), static function () use ($event) {
+            return new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'),
+                new MockTransport(array(new HttpResponse(200, json_encode($event['data']), array()))));
+        });
+        $body = json_encode($event);
+        $signature = whmcs_signed_header('whsec_sandbox', $body, time());
+        assertSameValue(400, $processor->handle($body, $signature, whmcs_gateway_params())->statusCode(), 'Manual review is retryable for ' . $mismatch . '.');
+        assertSameValue('awaiting_client', $store->findByExternalOrderId('whmcs_42_0')['status'], 'Unapplied review cannot finalize the snapshot.');
+        assertSameValue(0, count($adapter->payments), 'No native credit before correction.');
+        $adapter->invoices[42]['total'] = '100.00';
+        $adapter->invoiceCurrencies[42] = 'USD';
+        assertSameValue(200, $processor->handle($body, $signature, whmcs_gateway_params())->statusCode(), 'Corrected invoice recovers the same event.');
+        assertSameValue('paid', $store->findByExternalOrderId('whmcs_42_0')['status'], 'Successful credit finalizes snapshot.');
+        assertSameValue(1, count($adapter->payments), 'Recovered charge is credited once.');
+        assertSameValue('60.00', $adapter->payments[0]['amount'], 'Recovery credits the partial charge, never the invoice total.');
+        assertSameValue(200, $processor->handle($body, $signature, whmcs_gateway_params())->statusCode(), 'Recovered delivery is now a committed duplicate.');
+        assertSameValue(1, count($adapter->payments), 'Duplicate after recovery creates no additional credit.');
+    }
 }
 
 function test_whmcs_callback_ignores_a_stale_event_after_a_final_status()
@@ -543,9 +611,9 @@ function test_whmcs_callback_holds_a_payment_processed_in_another_currency()
         return $client;
     }))->handle($body, whmcs_signed_header('whsec_sandbox', $body, time()), whmcs_gateway_params(array('amount' => '108.00')));
 
-    assertSameValue(200, $result->statusCode(), 'a currency mismatch is acknowledged, not retried.');
+    assertSameValue(400, $result->statusCode(), 'A currency mismatch remains retryable until reviewed.');
     assertSameValue(0, count($adapter->payments), 'a USD payment must not be credited to a EUR invoice.');
-    $last = $adapter->logs[count($adapter->logs) - 1]['status'];
+    $last = $adapter->logs[count($adapter->logs) - 2]['status'];
     assertContainsValue('Manual review', $last, 'a currency mismatch must be flagged for manual review.');
     assertContainsValue('EUR', $last, 'the review note must name the WHMCS invoice currency.');
 }
@@ -565,7 +633,7 @@ function test_whmcs_reconciler_holds_a_payment_processed_in_another_currency()
 
     assertSameValue(0, $count, 'a currency mismatch is not a reconciled payment.');
     assertSameValue(0, count($adapter->payments), 'the reconciler must not credit a USD payment to a EUR invoice.');
-    assertContainsValue('Manual review', $adapter->logs[count($adapter->logs) - 1]['status'], 'the reconciler must flag it for manual review.');
+    assertContainsValue('Manual review', $adapter->logs[count($adapter->logs) - 2]['status'], 'the reconciler must flag it for manual review.');
 }
 
 function test_whmcs_callback_retries_when_the_invoice_currency_is_unknown()

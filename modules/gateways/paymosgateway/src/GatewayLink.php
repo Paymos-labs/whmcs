@@ -120,6 +120,7 @@ final class GatewayLink
         if ($paymosInvoiceId === '' || $paymentUrl === '') {
             throw new \RuntimeException('Paymos invoice create response is missing invoice id or payment URL.');
         }
+        $status = $this->responseField($response, array('status'));
 
         $this->store->save(array(
             'whmcs_invoice_id' => $invoiceId,
@@ -131,7 +132,9 @@ final class GatewayLink
             'invoice_total' => $this->invoiceTotal($invoiceId),
             'currency' => $currency,
             'payment_url' => $paymentUrl,
-            'status' => $this->responseField($response, array('status')) ?: 'created',
+            // A recovered idempotent response can already be terminal without
+            // its payment having been booked in WHMCS. Leave native apply open.
+            'status' => StatusMapper::isFinalStatus($status) ? 'created' : ($status ?: 'created'),
             'renew_count' => $renewCount,
         ));
 

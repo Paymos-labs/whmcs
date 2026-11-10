@@ -65,6 +65,43 @@ function test_whmcs_translation_unknown_language_reads_english()
     assertSameValue('Pay with Paymos', Translation::text('pay_button', $params), 'An unshipped language must fall back to English.');
 }
 
+function test_whmcs_connect_catalogs_cover_every_ui_label()
+{
+    foreach (array('english', 'russian', 'german', 'spanish', 'turkish', 'chinese') as $language) {
+        $catalog = require PAYMOS_WHMCS_MODULE_DIR . 'lang/' . $language . '.php';
+        foreach (array('button', 'starting', 'waiting', 'open', 'blocked', 'code', 'failed') as $key) {
+            assertTrueValue(isset($catalog['connect_' . $key]) && $catalog['connect_' . $key] !== '', $language . ' must translate ' . $key);
+            assertSameValue($catalog['connect_' . $key], Translation::text('connect_' . $key, array('language' => $language)), 'Connect must resolve its admin language.');
+        }
+    }
+}
+
+function test_whmcs_connect_requires_gateway_configuration_permission()
+{
+    $_SESSION['adminid'] = 42;
+    $GLOBALS['paymos_connect_permission'] = false;
+    try {
+        paymosgateway_connect_authorize();
+        throw new RuntimeException('A restricted admin must not start or poll Connect.');
+    } catch (RuntimeException $error) {
+        assertSameValue('paymos_connect_access_denied', $error->getMessage(), 'Restricted admin must be denied.');
+    }
+    $GLOBALS['paymos_connect_permission'] = true;
+    paymosgateway_connect_authorize();
+    unset($_SESSION['adminid'], $GLOBALS['paymos_connect_permission']);
+}
+
+function test_whmcs_connect_entry_denies_both_device_actions_before_platform_access()
+{
+    foreach (array('start', 'poll') as $action) {
+        $output = array();
+        $status = 0;
+        exec(escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/fixtures/connect-entry.php') . ' ' . escapeshellarg($action) . ' 2>&1', $output, $status);
+        assertSameValue(0, $status, implode(PHP_EOL, $output));
+        assertContainsValue('OK denied', implode(PHP_EOL, $output), 'Both device actions must fail closed without gateway permission.');
+    }
+}
+
 // The gateway decides whether to surface the API's English error detail. That
 // decision used to be made by comparing a button label against its English text,
 // which couples an unrelated string to error handling.

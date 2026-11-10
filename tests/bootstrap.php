@@ -10,6 +10,12 @@ if (!function_exists('add_hook')) {
 if (!function_exists('check_token')) {
     function check_token($name = 'token', $form = '') { return true; }
 }
+if (!function_exists('checkPermission')) {
+    function checkPermission($permission, $return = false)
+    {
+        return $permission === 'Configure Payment Gateways' && !empty($GLOBALS['paymos_connect_permission']);
+    }
+}
 if (!function_exists('get_admin_url')) {
     function get_admin_url($path = '') { return 'https://whmcs.test/admin/' . $path; }
 }
@@ -214,11 +220,15 @@ function whmcs_invoice_event($eventId, $eventType, $status, array $overrides = a
 
 final class FakeWhmcsAdapter implements PaymosWhmcs\WhmcsAdapterInterface
 {
+    public $lockError = null;
     public $beforePayment = null;
     private $lockedInvoices = array();
 
     public function withInvoiceLock($invoiceId, callable $action)
     {
+        if ($this->lockError !== null) {
+            throw $this->lockError;
+        }
         if (isset($this->lockedInvoices[$invoiceId])) {
             throw new RuntimeException('Invoice payment is in progress.');
         }

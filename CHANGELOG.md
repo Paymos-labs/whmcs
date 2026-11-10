@@ -8,6 +8,12 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-11-10
+
+- feat(notifications): rewrite all 71 email and 52 Telegram RU templates, lifecycle series, and R01-R34 audit fixes
+- chore: bundle Paymos PHP SDK v1.10.0
+- chore: rebuild canonical CMS package
+
 ## [1.5.8] - 2026-11-08
 
 - chore: rebuild canonical CMS package

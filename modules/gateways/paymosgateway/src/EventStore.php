@@ -64,7 +64,13 @@ final class EventStore implements CommitAwareEventStoreInterface
                 'created_at' => $now,
             ));
         } catch (\Exception $e) {
-            return false;
+            // Only a competing unique-key insert means busy/duplicate. Storage
+            // failures must reach the callback as 500 so operators can diagnose them.
+            $errorInfo = isset($e->errorInfo) && is_array($e->errorInfo) ? $e->errorInfo : array();
+            if (($errorInfo[1] ?? null) === 1062 || (string) $e->getCode() === '23505') {
+                return false;
+            }
+            throw new InfrastructureException('WHMCS event storage failed.', 0, $e);
         }
 
         $this->pendingEventId = $eventId;

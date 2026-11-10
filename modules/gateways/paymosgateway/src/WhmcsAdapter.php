@@ -9,7 +9,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
     public function withInvoiceLock($invoiceId, callable $action)
     {
         if (!class_exists('\\WHMCS\\Database\\Capsule')) {
-            throw new \RuntimeException('WHMCS database is unavailable.');
+            throw new InfrastructureException('WHMCS database is unavailable.');
         }
         // Named locks belong to one MySQL session. Always use the same writer
         // PDO, including on WHMCS installations with read replicas configured.
@@ -17,8 +17,12 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
         $name = 'paymos-whmcs-invoice:' . (int) $invoiceId;
         $acquire = $pdo->prepare('SELECT GET_LOCK(?, 10)');
         $acquire->execute(array($name));
-        if ((int) $acquire->fetchColumn() !== 1) {
-            throw new \RuntimeException('WHMCS invoice payment is being processed; retry later.');
+        $acquired = $acquire->fetchColumn();
+        if ($acquired === null || $acquired === false) {
+            throw new InfrastructureException('WHMCS invoice lock could not be acquired.');
+        }
+        if ((int) $acquired !== 1) {
+            throw new InvoiceBusyException('WHMCS invoice payment is being processed; retry later.');
         }
         try {
             return $action();
@@ -31,7 +35,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
     public function checkInvoiceId($invoiceId, $gatewayModuleName)
     {
         if (!function_exists('checkCbInvoiceID')) {
-            throw new \RuntimeException('WHMCS callback invoice helper is unavailable.');
+            throw new InfrastructureException('WHMCS callback invoice helper is unavailable.');
         }
 
         return checkCbInvoiceID($invoiceId, $gatewayModuleName);
@@ -40,7 +44,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
     public function checkTransactionId($transactionId)
     {
         if (!function_exists('checkCbTransID')) {
-            throw new \RuntimeException('WHMCS callback transaction helper is unavailable.');
+            throw new InfrastructureException('WHMCS callback transaction helper is unavailable.');
         }
 
         return checkCbTransID($transactionId);
@@ -49,7 +53,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
     public function addInvoicePayment($invoiceId, $transactionId, $paymentAmount, $paymentFee, $gatewayModuleName)
     {
         if (!function_exists('addInvoicePayment')) {
-            throw new \RuntimeException('WHMCS add invoice payment helper is unavailable.');
+            throw new InfrastructureException('WHMCS add invoice payment helper is unavailable.');
         }
 
         if ($gatewayModuleName === 'paymosgateway') {
@@ -70,12 +74,12 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
     public function getInvoice($invoiceId)
     {
         if (!function_exists('localAPI')) {
-            throw new \RuntimeException('WHMCS local API is unavailable.');
+            throw new InfrastructureException('WHMCS local API is unavailable.');
         }
 
         $response = localAPI('GetInvoice', array('invoiceid' => (int) $invoiceId));
         if (!is_array($response)) {
-            throw new \RuntimeException('WHMCS GetInvoice returned no response.');
+            throw new InfrastructureException('WHMCS GetInvoice returned no response.');
         }
         if (!isset($response['result']) || $response['result'] === 'success') {
             return $response;
@@ -89,7 +93,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
             return array();
         }
 
-        throw new \RuntimeException('WHMCS GetInvoice failed: ' . ($message !== '' ? $message : 'no message'));
+        throw new InfrastructureException('WHMCS GetInvoice failed: ' . ($message !== '' ? $message : 'no message'));
     }
 
     public function invoiceCurrency($invoiceId)
@@ -99,10 +103,10 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
         $invoice = $this->getInvoice($invoiceId);
         $clientId = isset($invoice['userid']) && is_scalar($invoice['userid']) ? (int) $invoice['userid'] : 0;
         if ($clientId <= 0) {
-            throw new \RuntimeException('WHMCS invoice ' . (int) $invoiceId . ' could not be read to find its currency.');
+            throw new InfrastructureException('WHMCS invoice ' . (int) $invoiceId . ' could not be read to find its currency.');
         }
         if (!function_exists('localAPI')) {
-            throw new \RuntimeException('WHMCS local API is unavailable.');
+            throw new InfrastructureException('WHMCS local API is unavailable.');
         }
 
         $response = localAPI('GetClientsDetails', array('clientid' => $clientId));
@@ -110,7 +114,7 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
             $message = is_array($response) && isset($response['message']) && is_scalar($response['message'])
                 ? (string) $response['message']
                 : 'no response';
-            throw new \RuntimeException('WHMCS GetClientsDetails failed: ' . $message);
+            throw new InfrastructureException('WHMCS GetClientsDetails failed: ' . $message);
         }
 
         $sources = array(
@@ -123,13 +127,13 @@ final class WhmcsAdapter implements WhmcsAdapterInterface
             }
         }
 
-        throw new \RuntimeException('WHMCS did not report the currency of client ' . $clientId . '.');
+        throw new InfrastructureException('WHMCS did not report the currency of client ' . $clientId . '.');
     }
 
     public function transactionExists($transactionId)
     {
         if (!class_exists('\\WHMCS\\Database\\Capsule')) {
-            throw new \RuntimeException('WHMCS database is unavailable.');
+            throw new InfrastructureException('WHMCS database is unavailable.');
         }
 
         // tblaccounts is where addInvoicePayment() books the transaction and

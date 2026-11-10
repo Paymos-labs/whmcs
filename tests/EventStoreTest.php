@@ -31,10 +31,12 @@ namespace {
     {
         /** @var array<string, array<string, array<string, mixed>>> */
         public static $tables = array();
+        public static $insertError = null;
 
         public static function reset()
         {
             self::$tables = array();
+            self::$insertError = null;
         }
     }
 
@@ -107,11 +109,16 @@ namespace {
 
         public function insert(array $data)
         {
+            if (FakeWhmcsCapsuleState::$insertError !== null) {
+                throw FakeWhmcsCapsuleState::$insertError;
+            }
             if (isset($data['event_id'])
                 && isset(FakeWhmcsCapsuleState::$tables[$this->table][$data['event_id']])) {
                 // MySQL would reject the duplicate PRIMARY KEY; the store
                 // catches it and answers "already seen".
-                throw new RuntimeException('Duplicate entry for key PRIMARY: ' . $data['event_id']);
+                $error = new PDOException('Duplicate entry for key PRIMARY: ' . $data['event_id']);
+                $error->errorInfo = array('23000', 1062, $error->getMessage());
+                throw $error;
             }
 
             if (isset($data['event_id'])) {
@@ -161,6 +168,20 @@ namespace {
         assertTrueValue($store->remember('evt_1', 604800), 'released event must be retryable.');
         assertTrueValue($store->commit(), 'an in-memory commit of a pending reservation succeeds.');
         assertFalseValue($store->remember('evt_1', 604800), 'committed event must be treated as duplicate.');
+    }
+
+    function test_whmcs_event_storage_failure_is_not_reported_as_busy()
+    {
+        $adapter = new FakeWhmcsAdapter();
+        FakeWhmcsCapsuleState::$insertError = new PDOException('Database unavailable');
+        $body = json_encode(whmcs_invoice_event('evt_db_failure', 'invoice.paid', 'paid'));
+        $result = (new PaymosWhmcs\CallbackProcessor($adapter, whmcs_store_with_invoice(), new PaymosWhmcs\EventStore()))->handle(
+            $body, whmcs_signed_header('whsec_sandbox', $body, time()), whmcs_gateway_params());
+        assertSameValue(500, $result->statusCode(), 'INSERT storage failure must return 500, never busy/409.');
+        assertSameValue(0, count($adapter->payments), 'Storage failure must not credit payment.');
+        FakeWhmcsCapsuleState::$insertError = new PDOException('Duplicate');
+        FakeWhmcsCapsuleState::$insertError->errorInfo = array('23000', 1062, 'Duplicate');
+        assertFalseValue((new PaymosWhmcs\EventStore())->remember('evt_insert_race', 604800), 'A duplicate INSERT race must remain a reservation conflict.');
     }
 
     function test_whmcs_db_event_store_tells_a_locked_event_from_a_committed_one()

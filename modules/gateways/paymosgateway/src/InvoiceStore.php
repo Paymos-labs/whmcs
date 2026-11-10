@@ -49,6 +49,7 @@ final class InvoiceStore implements InvoiceStoreInterface
 
         $row = \WHMCS\Database\Capsule::table(Migrations::INVOICES_TABLE)
             ->where('external_order_id', (string) $externalOrderId)
+            ->useWritePdo()
             ->first();
 
         return $this->toArray($row);

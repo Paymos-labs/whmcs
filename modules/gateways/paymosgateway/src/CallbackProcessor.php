@@ -91,6 +91,13 @@ final class CallbackProcessor
             return new CallbackResult(401, 'Bad signature');
         } catch (TimestampSkewException $e) {
             return new CallbackResult(401, 'Bad timestamp');
+        } catch (InvoiceBusyException $e) {
+            $this->releaseEvent();
+            return new CallbackResult(409, 'In progress');
+        } catch (InfrastructureException | \PDOException $e) {
+            $this->releaseEvent();
+            $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Storage error');
+            return new CallbackResult(500, 'Processing failed');
         } catch (\InvalidArgumentException $e) {
             $this->releaseEvent();
             $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Configuration error');
@@ -103,6 +110,10 @@ final class CallbackProcessor
             }
             $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Error');
             return new CallbackResult(400, 'Processing failed');
+        } catch (\Throwable $e) {
+            $this->releaseEvent();
+            $this->whmcs->logTransaction($this->gatewayName($gatewayParams), array('error' => $e->getMessage()), 'Internal error');
+            return new CallbackResult(500, 'Processing failed');
         }
     }
 
@@ -163,7 +174,11 @@ final class CallbackProcessor
             return false;
         }
         return $this->whmcs->withInvoiceLock((int) $row['whmcs_invoice_id'], function () use ($event, $environment, $row, $gatewayParams, $reverseVerify, $fromCron) {
-            return $this->applyLockedEventToWhmcs($event, $environment, $row, $gatewayParams, $reverseVerify, $fromCron);
+            $fresh = $this->invoiceStore->findByExternalOrderId($event->externalOrderId());
+            if (!is_array($fresh) || (int) $fresh['whmcs_invoice_id'] !== (int) $row['whmcs_invoice_id']) {
+                throw new \RuntimeException('Paymos invoice snapshot changed while acquiring its lock.');
+            }
+            return $this->applyLockedEventToWhmcs($event, $environment, $fresh, $gatewayParams, $reverseVerify, $fromCron);
         });
     }
 
@@ -185,6 +200,12 @@ final class CallbackProcessor
             $whmcsInvoiceId = $this->whmcs->checkInvoiceId((int) $row['whmcs_invoice_id'], $gatewayName);
         }
         $this->assertRowMatchesEvent($row, $event, $environment);
+
+        if (StatusMapper::invoiceAction($event->type(), $event->status()) !== StatusMapper::ACTION_NOTE_PAID_LATE
+            && StatusMapper::isFinalStatus(isset($row['status']) ? (string) $row['status'] : '')) {
+            $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Ignored (stale status after a final one)');
+            return false;
+        }
 
         if ($reverseVerify && $this->requiresReverseVerify($event)) {
             $result = (new InvoiceReverseVerifier($this->client($environment, $gatewayParams)))->verify($event, array(
@@ -289,11 +310,9 @@ final class CallbackProcessor
         $invoiceUnchanged = AmountGuard::amountsEqual($expectedTotal, $currentAmount);
 
         if (!$currencyMatches || !$chargeMatches || !$invoiceUnchanged) {
-            // A currency or amount mismatch on a reverse-verified paid invoice is
-            // not a transient failure — the figures won't change on redelivery. Do
-            // not throw into the retry path (that 400s and the server retries
-            // forever); hold the invoice for manual review and acknowledge (200).
-            $this->invoiceStore->updateStatus($event->invoiceId(), $event->status());
+            // The remote payment is verified, but has not been applied locally.
+            // Keep its snapshot open so correcting the invoice allows the same
+            // event or the next reconciliation pass to credit the charge once.
             $this->whmcs->logTransaction($gatewayName, $event->toArray(), 'Manual review: ' . AmountGuard::mismatchSummary(
                 $currencyMatches && $chargeMatches ? $expectedTotal : $row['amount'],
                 $row['currency'],
@@ -302,7 +321,7 @@ final class CallbackProcessor
                 $event->orderAmount(),
                 $event->orderCurrency()
             ));
-            return false;
+            throw new \RuntimeException('Paymos payment amount or currency requires manual review.');
         }
 
         $transactionId = $this->transactionId($event);
@@ -520,14 +539,21 @@ final class CallbackProcessor
     private function commitEvent()
     {
         if (method_exists($this->eventStore, 'commit')) {
-            $this->eventStore->commit();
+            if ($this->eventStore->commit() !== true) {
+                throw new InfrastructureException('WHMCS event receipt was not committed.');
+            }
         }
     }
 
     private function releaseEvent()
     {
         if (method_exists($this->eventStore, 'release')) {
-            $this->eventStore->release();
+            try {
+                $this->eventStore->release();
+            } catch (\Throwable $releaseError) {
+                // Preserve the original classified failure even if the database
+                // is still down. The owner-fenced reservation expires for retry.
+            }
         }
     }
 }

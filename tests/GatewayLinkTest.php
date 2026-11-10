@@ -44,6 +44,40 @@ function test_whmcs_gateway_link_creates_paymos_invoice_and_stores_snapshot()
     assertSameValue(false, isset($payload['order']), 'Paymos create payload must not use the webhook/read-model order object.');
 }
 
+function test_whmcs_gateway_recovered_paid_create_is_applied_by_callback_or_reconcile()
+{
+    foreach (array('paid', 'paid_over') as $status) {
+        foreach (array('callback', 'reconcile') as $route) {
+            $store = new InMemoryInvoiceStore();
+            $adapter = new FakeWhmcsAdapter();
+            $invoice = array('invoice_id' => 'inv_123', 'project_id' => 'prj_123',
+                'payment_url' => 'https://checkout.paymos.test/inv_123', 'status' => $status, 'is_test' => true,
+                'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'));
+            $clientFactory = static function () use ($invoice) {
+                return new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'),
+                    new MockTransport(array(new HttpResponse(200, json_encode($invoice), array()))));
+            };
+            (new GatewayLink($store, $clientFactory, $adapter))->render(whmcs_gateway_params());
+            assertSameValue('created', $store->findByWhmcsInvoiceId(42)['status'], 'Recovered remote terminal status is not a native payment receipt.');
+            assertSameValue(0, count($adapter->payments), 'Link rendering does not book native payment.');
+            if ($route === 'callback') {
+                $processor = new PaymosWhmcs\CallbackProcessor($adapter, $store, new PaymosWhmcs\InMemoryEventStore(), $clientFactory);
+                $body = json_encode(whmcs_invoice_event('evt_recovered', 'invoice.' . $status, $status));
+                $sig = whmcs_signed_header('whsec_sandbox', $body, time());
+                assertSameValue(200, $processor->handle($body, $sig, whmcs_gateway_params())->statusCode(), 'Recovered paid callback applies.');
+                assertSameValue(200, $processor->handle($body, $sig, whmcs_gateway_params())->statusCode(), 'Recovered callback duplicate is acknowledged.');
+            } else {
+                $reconciler = new PaymosWhmcs\Reconciler($store, $adapter, $clientFactory);
+                assertSameValue(1, $reconciler->run(whmcs_gateway_params(), time()), 'Recovered payment remains in the reconciliation window.');
+                assertSameValue(0, $reconciler->run(whmcs_gateway_params(), time()), 'Applied snapshot leaves the window.');
+            }
+            assertSameValue($status, $store->findByWhmcsInvoiceId(42)['status'], 'Successful native credit finalizes the snapshot.');
+            assertSameValue(1, count($adapter->payments), 'Recovered payment is credited exactly once.');
+            assertSameValue('100.00', $adapter->payments[0]['amount'], 'Recovered charge retains native amount formatting.');
+        }
+    }
+}
+
 function test_whmcs_gateway_link_does_not_use_email_as_client_id()
 {
     $store = new InMemoryInvoiceStore();
