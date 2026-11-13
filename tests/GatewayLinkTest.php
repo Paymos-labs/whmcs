@@ -520,3 +520,186 @@ function test_whmcs_gateway_link_failure_notice_keeps_the_other_messages()
         'another language reads its own line instead of the English detail.'
     );
 }
+
+/**
+ * Transport that records every request and answers from a script; a scripted
+ * \Exception is thrown after the request is recorded: the server received the
+ * POST, the module never learned its result.
+ */
+final class WhmcsScriptedTransport implements \Paymos\Http\TransportInterface
+{
+    /** @var array<int, HttpResponse|\Exception> */
+    private $script;
+
+    /** @var array<int, array<string, mixed>> */
+    private $requests = array();
+
+    public function __construct(array $script)
+    {
+        $this->script = array_values($script);
+    }
+
+    public function request($method, $url, array $headers, $body, $timeoutSeconds)
+    {
+        $this->requests[] = array('method' => (string) $method, 'url' => (string) $url, 'body' => (string) $body);
+        if (count($this->script) === 0) {
+            throw new \RuntimeException('No scripted response for ' . $method . ' ' . $url);
+        }
+        $next = array_shift($this->script);
+        if ($next instanceof \Exception) {
+            throw $next;
+        }
+
+        return $next;
+    }
+
+    public function requests()
+    {
+        return $this->requests;
+    }
+}
+
+/** Store whose next save() of a bound (non-intent) row fails once. */
+final class WhmcsFailingBindStore implements PaymosWhmcs\InvoiceStoreInterface
+{
+    /** @var InMemoryInvoiceStore */
+    public $inner;
+
+    /** @var bool */
+    public $failNextBind = false;
+
+    public function __construct(InMemoryInvoiceStore $inner)
+    {
+        $this->inner = $inner;
+    }
+
+    public function findByWhmcsInvoiceId($invoiceId) { return $this->inner->findByWhmcsInvoiceId($invoiceId); }
+    public function findByExternalOrderId($externalOrderId) { return $this->inner->findByExternalOrderId($externalOrderId); }
+    public function updateStatus($paymosInvoiceId, $status) { $this->inner->updateStatus($paymosInvoiceId, $status); }
+    public function findUnpaidRecent($limit, $sinceTimestamp) { return $this->inner->findUnpaidRecent($limit, $sinceTimestamp); }
+
+    public function save(array $row)
+    {
+        if ($this->failNextBind && !GatewayLink::isPendingIntent($row)) {
+            $this->failNextBind = false;
+            throw new \RuntimeException('database write failed');
+        }
+        $this->inner->save($row);
+    }
+}
+
+function whmcs_created_response($invoiceId, $status = 'awaiting_client')
+{
+    return new HttpResponse(201, json_encode(array(
+        'invoice_id' => $invoiceId,
+        'status' => $status,
+        'payment_url' => 'https://checkout.paymos.test/' . $invoiceId,
+    )), array());
+}
+
+function whmcs_render_expecting_failure(GatewayLink $link, array $params)
+{
+    try {
+        $link->render($params);
+    } catch (\Exception $e) {
+        return $e;
+    }
+
+    throw new RuntimeException('render must fail while the create result is unknown.');
+}
+
+/**
+ * A46-01: the first create reaches the server but its response is lost; the
+ * amount due then changes. The next render must replay the stored request
+ * (same key, same amount) to learn the invoice, close it, and only then cut
+ * the next generation. It never re-sends whmcs_42_0 with the new amount.
+ */
+function test_whmcs_lost_create_response_recovers_original_payload_before_amount_change()
+{
+    $store = new InMemoryInvoiceStore();
+    $transport = new WhmcsScriptedTransport(array(
+        new \RuntimeException('timeout after the request was sent'),
+        new \RuntimeException('still unreachable'),
+        whmcs_created_response('inv_lost'),
+        whmcs_live_invoice_response('inv_lost', 'cancelled', time() + 600),
+        whmcs_created_response('inv_new'),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+    $adapter = new FakeWhmcsAdapter();
+
+    whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), whmcs_gateway_params());
+    $intent = $store->findByWhmcsInvoiceId(42);
+    assertSameValue('creating', $intent['status'], 'the create intent is stored before the POST.');
+    assertSameValue('whmcs_42_0', $intent['external_order_id'], 'the intent carries the idempotency key.');
+    assertSameValue('100.00', $intent['amount'], 'the intent carries the original amount.');
+
+    $changed = whmcs_gateway_params(array('amount' => '120.00'));
+
+    // The replay itself fails: nothing new is created over the unknown invoice.
+    whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), $changed);
+    assertSameValue(2, count($transport->requests()), 'only the replay was attempted.');
+    assertSameValue(null, $store->findByExternalOrderId('whmcs_42_1'), 'no next generation exists while the first result is unknown.');
+
+    $html = (new GatewayLink($store, $factory, $adapter))->render($changed);
+
+    $requests = $transport->requests();
+    $original = json_decode($requests[0]['body'], true);
+    assertSameValue(5, count($requests), 'create (lost), replay (failed), replay, cancel, create.');
+    foreach (array(1, 2) as $replay) {
+        assertSameValue($original, json_decode($requests[$replay]['body'], true), 'the replay sends exactly the original payload.');
+    }
+    assertSameValue('100.00', $original['amount'], 'the original payload kept the original amount.');
+    assertSameValue('https://api.paymos.test/v1/invoices/inv_lost/cancel', $requests[3]['url'], 'the recovered invoice is closed before replacement.');
+    $next = json_decode($requests[4]['body'], true);
+    assertSameValue('whmcs_42_1', $next['external_order_id'], 'the new amount goes out under the next key.');
+    assertSameValue('120.00', $next['amount'], 'the next generation carries the new amount.');
+
+    assertSameValue('inv_lost', $store->findByExternalOrderId('whmcs_42_0')['paymos_invoice_id'], 'the recovered invoice is bound to its key.');
+    assertSameValue('cancelled', $store->findByExternalOrderId('whmcs_42_0')['status'], 'the recovered invoice records its close.');
+    assertContainsValue('https://checkout.paymos.test/inv_new', $html, 'the client is sent to the new invoice.');
+}
+
+/**
+ * A46-01: the POST succeeds but the local bind fails. The next render replays
+ * the identical request and binds the invoice the server already made.
+ */
+function test_whmcs_failed_bind_after_create_replays_the_same_request()
+{
+    $store = new WhmcsFailingBindStore(new InMemoryInvoiceStore());
+    $store->failNextBind = true;
+    $transport = new WhmcsScriptedTransport(array(
+        whmcs_created_response('inv_123'),
+        whmcs_created_response('inv_123'),
+        whmcs_live_invoice_response('inv_123', 'awaiting_client', time() + 600),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+    $adapter = new FakeWhmcsAdapter();
+
+    whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), whmcs_gateway_params());
+    assertSameValue('creating', $store->findByWhmcsInvoiceId(42)['status'], 'the intent survives the failed bind.');
+
+    $html = (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params());
+
+    $requests = $transport->requests();
+    assertSameValue(array('POST', 'POST', 'GET'), array_column($requests, 'method'), 'create, replay, liveness read.');
+    assertSameValue($requests[0]['body'], $requests[1]['body'], 'the replay is byte-identical to the first create.');
+    assertSameValue('inv_123', $store->findByWhmcsInvoiceId(42)['paymos_invoice_id'], 'the invoice is bound after the replay.');
+    assertSameValue('whmcs_42_0', $store->findByWhmcsInvoiceId(42)['external_order_id'], 'no new key is cut.');
+    assertContainsValue('https://checkout.paymos.test/inv_123', $html, 'the client gets the one invoice the server made.');
+}
+
+/** A46-01: the reconciler never reads a create intent that has no invoice id yet. */
+function test_whmcs_reconciler_skips_a_pending_create_intent()
+{
+    $store = new InMemoryInvoiceStore();
+    $transport = new WhmcsScriptedTransport(array(new \RuntimeException('lost')));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+    $adapter = new FakeWhmcsAdapter();
+    whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), whmcs_gateway_params());
+
+    assertSameValue(0, (new PaymosWhmcs\Reconciler($store, $adapter, $factory))->run(whmcs_gateway_params(), time()), 'nothing is applied.');
+    assertSameValue(1, count($transport->requests()), 'no GET is sent for a placeholder id.');
+}

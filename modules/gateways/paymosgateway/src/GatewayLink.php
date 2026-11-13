@@ -14,6 +14,9 @@ use Paymos\Plugin\StatusMapper;
 
 final class GatewayLink
 {
+    /** Snapshot status of a create whose POST was sent but whose result is not bound yet. */
+    const STATUS_CREATING = 'creating';
+
     /** @var InvoiceStoreInterface */
     private $store;
 
@@ -101,6 +104,12 @@ final class GatewayLink
         $currency = strtoupper($this->field($params, 'currency'));
         $existing = $this->store->findByWhmcsInvoiceId($invoiceId);
         $buttonText = $this->buttonText($params, $config);
+        if (is_array($existing) && self::isPendingIntent($existing)) {
+            // A previous create may have been accepted by the server while its
+            // response or the local bind was lost (A46-01). Replay that exact
+            // operation first; only the invoice it yields may be replaced.
+            $existing = $this->recoverPendingIntent($params, $existing, $config);
+        }
 
         if (is_array($existing) && $this->snapshotMatches($existing, $amount, $currency, $config)
             && $this->keepsExistingInvoice($existing, $config)) {
@@ -114,7 +123,93 @@ final class GatewayLink
         $renewCount = is_array($existing) && isset($existing['renew_count']) ? ((int) $existing['renew_count'] + 1) : 0;
         $externalOrderId = 'whmcs_' . $invoiceId . '_' . $renewCount;
         $payload = $this->createPayload($params, $config, $amount, $currency, $externalOrderId);
+
+        // The operation identity (external_order_id) and every field the server
+        // compares on a repeated key (project, amount, currency, environment) are
+        // stored BEFORE the POST. If its result is lost, the next render replays
+        // exactly this request instead of re-sending the key with a new amount.
+        $intent = array(
+            'whmcs_invoice_id' => $invoiceId,
+            'paymos_invoice_id' => self::pendingInvoiceId($externalOrderId),
+            'external_order_id' => $externalOrderId,
+            'environment' => $config->environment(),
+            'project_id' => $config->projectId(),
+            'amount' => $amount,
+            'invoice_total' => $this->invoiceTotal($invoiceId),
+            'currency' => $currency,
+            'payment_url' => '',
+            'status' => self::STATUS_CREATING,
+            'renew_count' => $renewCount,
+        );
+        $this->store->save($intent);
+
         $response = $this->client($config)->invoices()->create($payload);
+        $row = $this->bindCreatedInvoice($intent, $response);
+
+        return $this->button($row['payment_url'], $buttonText);
+    }
+
+    /**
+     * Whether the row is a create intent stored before its POST and not yet
+     * bound to the invoice the server returned. Such a row has no Paymos
+     * invoice id: callbacks cannot match it and the reconciler skips it.
+     *
+     * @param array<string, mixed> $row
+     */
+    public static function isPendingIntent(array $row)
+    {
+        return isset($row['status']) && (string) $row['status'] === self::STATUS_CREATING;
+    }
+
+    /**
+     * Placeholder for the unique paymos_invoice_id column while the intent is
+     * pending: unique per external_order_id, never a real Paymos invoice id.
+     */
+    private static function pendingInvoiceId($externalOrderId)
+    {
+        return 'pending:' . $externalOrderId;
+    }
+
+    /**
+     * Replays the stored create request: same project, external_order_id,
+     * amount and currency, sent to the environment it was first sent to. The
+     * server answers a repeated key with the invoice it already made, so this
+     * learns the invoice the lost response carried. On any failure the intent
+     * stays pending and the render fails; no new key is cut over it.
+     *
+     * @param array<string, mixed> $params
+     * @param array<string, mixed> $intent
+     * @return array<string, mixed>
+     */
+    private function recoverPendingIntent(array $params, array $intent, Config $config)
+    {
+        $payload = array(
+            'project_id' => (string) $intent['project_id'],
+            'amount' => (string) $intent['amount'],
+            'currency' => (string) $intent['currency'],
+            'external_order_id' => (string) $intent['external_order_id'],
+        );
+        // Not compared by the server on a repeated key; derived from the WHMCS
+        // client exactly as on the first attempt.
+        $clientId = $this->clientId($params);
+        if ($clientId !== '') {
+            $payload['client_id'] = $clientId;
+        }
+
+        $response = $this->client($config, (string) $intent['environment'])->invoices()->create($payload);
+
+        return $this->bindCreatedInvoice($intent, $response);
+    }
+
+    /**
+     * Records the invoice the server returned for a stored intent.
+     *
+     * @param array<string, mixed> $intent
+     * @param array<string, mixed> $response
+     * @return array<string, mixed>
+     */
+    private function bindCreatedInvoice(array $intent, array $response)
+    {
         $paymosInvoiceId = $this->responseField($response, array('invoice_id'));
         $paymentUrl = $this->responseField($response, array('payment_url'));
         if ($paymosInvoiceId === '' || $paymentUrl === '') {
@@ -122,23 +217,15 @@ final class GatewayLink
         }
         $status = $this->responseField($response, array('status'));
 
-        $this->store->save(array(
-            'whmcs_invoice_id' => $invoiceId,
-            'paymos_invoice_id' => $paymosInvoiceId,
-            'external_order_id' => $externalOrderId,
-            'environment' => $config->environment(),
-            'project_id' => $config->projectId(),
-            'amount' => $amount,
-            'invoice_total' => $this->invoiceTotal($invoiceId),
-            'currency' => $currency,
-            'payment_url' => $paymentUrl,
-            // A recovered idempotent response can already be terminal without
-            // its payment having been booked in WHMCS. Leave native apply open.
-            'status' => StatusMapper::isFinalStatus($status) ? 'created' : ($status ?: 'created'),
-            'renew_count' => $renewCount,
-        ));
+        $row = $intent;
+        $row['paymos_invoice_id'] = $paymosInvoiceId;
+        $row['payment_url'] = $paymentUrl;
+        // A recovered idempotent response can already be terminal without
+        // its payment having been booked in WHMCS. Leave native apply open.
+        $row['status'] = StatusMapper::isFinalStatus($status) ? 'created' : ($status ?: 'created');
+        $this->store->save($row);
 
-        return $this->button($paymentUrl, $buttonText);
+        return $row;
     }
 
     /**

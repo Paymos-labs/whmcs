@@ -35,6 +35,11 @@ final class Reconciler
         $count = 0;
 
         foreach ($this->store->findUnpaidRecent(50, $now - 86400) as $row) {
+            if (GatewayLink::isPendingIntent($row)) {
+                // A create intent has no Paymos invoice id to read yet; the next
+                // render of the WHMCS invoice replays and binds it.
+                continue;
+            }
             try {
                 $invoice = $this->client((string) $row['environment'], $gatewayParams)->invoices()->get((string) $row['paymos_invoice_id']);
                 if (!$this->snapshotMatches($row, $invoice)) {

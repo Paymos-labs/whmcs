@@ -8,6 +8,12 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.6.5] - 2026-11-13
+
+- fix(plugins,publicweb): SDK webhook credit recipes, CMS recovery, redirects and CSP logs (audit 2026-11-13)
+- chore: bundle Paymos PHP SDK v1.10.1
+- chore: rebuild canonical CMS package
+
 ## [1.6.4] - 2026-11-13
 
 - chore: rebuild canonical CMS package
