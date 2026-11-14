@@ -2,7 +2,7 @@
   "schema": "1.0",
   "type": "whmcs-gateways",
   "name": "paymosgateway",
-  "version": "1.6.7",
+  "version": "1.6.8",
   "license": "MIT",
   "category": "payments",
   "description": {
