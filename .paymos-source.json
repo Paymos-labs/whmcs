@@ -1,6 +1,6 @@
 {
   "source_repository": "Paymos-labs/paymos",
   "source_path": "plugins/whmcs-paymos",
-  "source_commit": "cb03af2d83fc2322af668792248b7fb3e3b92e5f",
-  "version": "1.6.8"
+  "source_commit": "42478c720aab9c5e3261c853168f3d55c03c8f12",
+  "version": "1.6.9"
 }
