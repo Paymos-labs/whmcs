@@ -200,7 +200,7 @@ namespace {
         assertSameValue(1, CredentialStore::refundConfig('sandbox')['refund_contract_version'], 'contract version survives encryption.');
         assertSameValue(array(), CredentialStore::refundConfig('live')['capabilities'], 'capability cannot cross environments.');
         assertFalseValue(strpos(implode('', Capsule::$settings), 'pk_test_entry') !== false, 'credentials are encrypted at rest.');
-        foreach (array(array('capabilities' => array()), array('refund_contract_version' => '1'), array('refunds_enabled' => 'true')) as $changes) {
+        foreach (array(array('capabilities' => array()), array('refund_contract_version' => '1')) as $changes) {
             refund_entry_save($changes);
             $result = paymosgateway_refund(array('invoiceid' => 42, 'request_token' => PaymosWhmcs\RefundIntentStore::uuid(),
                 'amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
@@ -209,6 +209,10 @@ namespace {
             assertSameValue(0, count($f->server->requests), 'entry rejects before all HTTP.');
             assertSameValue(0, count($f->db->intents), 'rejected entry does not persist an intent.');
         }
+        refund_entry_save(array('refunds_enabled' => false));
+        $allowed = paymosgateway_refund_action(array('invoiceid' => 42, 'paymos_refund_action' => 'overpayment',
+            'request_token' => PaymosWhmcs\RefundIntentStore::uuid()));
+        assertSameValue('created', $allowed['cash_state'], 'stale Connect refunds_enabled=false does not block a valid contract.');
     } elseif ($scenario === 'unbound') {
         $data = array('type' => 'refund', 'withdrawal_id' => 'wd_external', 'invoice_id' => 'inv_123', 'project_id' => 'prj_123',
             'is_test' => true, 'external_order_id' => 'foreign_refund', 'mode' => 'full');

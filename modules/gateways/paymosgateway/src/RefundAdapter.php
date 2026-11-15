@@ -78,7 +78,13 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                     'invoice_id' => $mapping['paymos_invoice_id'], 'project_id' => $mapping['project_id'],
                     'environment' => $mapping['environment'], 'mode' => $mode, 'full_draft' => $draft));
                 $reason = $this->preflight($intent);
-                if ($reason !== null) { throw new \RuntimeException($reason); }
+                if ($reason !== null) {
+                    throw new \RuntimeException(
+                        $reason === NativeRefundProjectorInterface::PREFLIGHT_RETRY
+                            ? 'refund_preflight_unavailable'
+                            : $reason
+                    );
+                }
                 $intent = $this->store->createIntent($intent);
             }
             $this->coordinator($intent)->submit($intent->operationId());
@@ -113,26 +119,69 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                 throw new \RuntimeException('refund_native_draft_changed');
             }
             $config = call_user_func($this->configProvider, $intent->environment());
-            if (!isset($config['capabilities'], $config['refund_contract_version'], $config['refunds_enabled'])
+            if (!isset($config['capabilities'], $config['refund_contract_version'])
                 || !is_array($config['capabilities']) || !in_array('invoice_refunds_v1', $config['capabilities'], true)
-                || $config['refund_contract_version'] !== 1 || $config['refunds_enabled'] !== true) {
+                || $config['refund_contract_version'] !== 1) {
                 throw new \RuntimeException('refund_reconnect_required');
             }
-            $invoice = $this->client($intent->environment())->invoices()->get($intent->invoiceId());
+            // refunds_enabled in Connect is a historical snapshot; fresh summary/create owns enablement.
+            try {
+                $invoice = $this->client($intent->environment())->invoices()->get($intent->invoiceId());
+            } catch (\Paymos\Exception\ApiException $error) {
+                if ($error->statusCode() === 429 || $error->statusCode() >= 500) {
+                    return NativeRefundProjectorInterface::PREFLIGHT_RETRY;
+                }
+                return $error->errorCode() !== '' ? $error->errorCode() : $error->getMessage();
+            } catch (\RuntimeException $error) {
+                return NativeRefundProjectorInterface::PREFLIGHT_RETRY;
+            }
             $this->store->assertOwned();
             $this->assertInvoice($invoice, $snapshot, $intent);
-            $summary = $invoice['refund_summary'] ?? array();
+            $summary = $this->invoiceSummary($invoice, $intent);
             $field = $intent->mode() === RefundStates::FULL ? 'can_refund_full' : 'can_refund_overpayment';
             $amount = $intent->mode() === RefundStates::FULL ? 'full_refund_amount' : 'overpayment_refund_amount';
-            if (($summary[$field] ?? false) !== true || !isset($summary[$amount]) || !is_string($summary[$amount])
-                || !preg_match('/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/D', $summary[$amount])
-                || AmountGuard::normalizeDecimal($summary[$amount]) === '0') {
+            if (($summary[$field] ?? false) !== true) {
                 throw new \RuntimeException('refund_mode_unavailable');
+            }
+            if (array_key_exists('refund_summary', $invoice)) {
+                if (!isset($summary[$amount]) || !is_string($summary[$amount])
+                    || !preg_match('/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/D', $summary[$amount])
+                    || AmountGuard::normalizeDecimal($summary[$amount]) === '0') {
+                    throw new \RuntimeException('refund_mode_unavailable');
+                }
             }
             return null;
         } catch (\Throwable $error) {
             return $error->getMessage();
         }
+    }
+
+    private function invoiceSummary(array $invoice, RefundIntent $intent): array
+    {
+        if (array_key_exists('refund_summary', $invoice)) {
+            return is_array($invoice['refund_summary']) ? $invoice['refund_summary'] : array();
+        }
+        $status = isset($invoice['status']) && is_string($invoice['status']) ? $invoice['status'] : '';
+        $payment = isset($invoice['payment']) && is_array($invoice['payment']) ? $invoice['payment'] : array();
+        $completedOverpayment = false;
+        foreach ($this->store->forPayment($intent->paymentKey()) as $prior) {
+            if ($prior->invoiceId() === $intent->invoiceId()
+                && $prior->mode() === RefundStates::OVERPAYMENT
+                && $prior->cashState() === RefundStates::COMPLETED) {
+                $completedOverpayment = true;
+                break;
+            }
+        }
+        return array(
+            'can_refund_full' => in_array($status, array('paid', 'paid_over'), true),
+            'can_refund_overpayment' => $status === 'paid_over' && !$completedOverpayment,
+            // Gross does not establish the remaining cash after earlier refunds.
+            'full_refund_amount' => null,
+            'overpayment_refund_amount' => null,
+            'refund_asset' => isset($payment['currency'], $payment['network'])
+                ? array('currency' => $payment['currency'], 'network' => $payment['network'])
+                : null,
+        );
     }
 
     public function inspect(string $operationId): NativeProjectionResult

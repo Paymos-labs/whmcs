@@ -170,6 +170,8 @@ final class WhmcsRefundServer implements TransportInterface
     public $loseResponses = 0;
     public $refuse = false;
     public $scopeConflict = false;
+    public $omitSummary = false;
+    public $invoiceFailure = null;
     private $db;
 
     public function __construct($db) { $this->db = $db; }
@@ -211,12 +213,29 @@ final class WhmcsRefundServer implements TransportInterface
             }
             throw new RuntimeException('Unknown refund fixture');
         }
+        if ($this->invoiceFailure !== null) {
+            $failure = $this->invoiceFailure;
+            $this->invoiceFailure = null;
+            if ($failure instanceof Throwable) { throw $failure; }
+            $status = (int) $failure;
+            return new HttpResponse($status, json_encode(array(
+                'type' => 'https://api.paymos.io/errors/' . ($status === 404 ? 'not-found' : 'validation'),
+                'title' => $status === 404 ? 'Not Found' : 'Bad Request',
+                'status' => $status,
+                'detail' => 'Simulated invoice read failure',
+                'code' => $status === 404 ? 'invoice_not_found' : 'refund_denied',
+            )), array('content-type' => 'application/problem+json'));
+        }
         $completed = false;
         foreach ($this->refunds as $refund) { $completed = $completed || ($refund['mode'] === 'overpayment' && $refund['status'] === 'completed'); }
-        return new HttpResponse(200, json_encode(array('invoice_id' => 'inv_123', 'project_id' => $this->scopeConflict ? 'prj_foreign' : 'prj_123',
+        $invoice = array('invoice_id' => 'inv_123', 'project_id' => $this->scopeConflict ? 'prj_foreign' : 'prj_123',
             'is_test' => true, 'status' => 'paid_over', 'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
-            'refund_summary' => array('can_refund_full' => true, 'can_refund_overpayment' => true,
-                'full_refund_amount' => $completed ? '100' : '120', 'overpayment_refund_amount' => '20'))), array());
+            'payment' => array('paid' => '120', 'currency' => 'USDT', 'network' => 'TRC20'));
+        if (!$this->omitSummary) {
+            $invoice['refund_summary'] = array('can_refund_full' => true, 'can_refund_overpayment' => true,
+                'full_refund_amount' => $completed ? '100' : '120', 'overpayment_refund_amount' => '20');
+        }
+        return new HttpResponse(200, json_encode($invoice), array());
     }
 }
 
@@ -490,6 +509,159 @@ function test_whmcs_refund_unknown_token_without_admin_session_is_denied_before_
     $result = $adapter->nativeRefund(array('invoiceid' => 42, 'request_token' => RefundIntentStore::uuid(), 'amount' => '100.00'));
     assertSameValue('error', $result['status'], 'unprotected entry is refused.');
     assertContainsValue('refund_admin_access_denied', $result['rawdata']['reason'], 'authorization runs before storage or HTTP.');
+}
+
+function test_whmcs_refund_stale_connect_disabled_does_not_block_when_contract_valid()
+{
+    $f = whmcs_refund_fixture();
+    $f->config->refunds_enabled = false;
+    $intent = $f->adapter->submit(whmcs_refund_input('full'));
+    assertSameValue(RefundStates::CREATED, $intent->cashState(), 'valid capability and contract v1 proceed despite stale refunds_enabled=false.');
+}
+
+function test_whmcs_refund_without_server_summary_allows_null_amounts_and_blocks_repeat_completed_overpayment()
+{
+    $f = whmcs_refund_fixture();
+    $f->server->omitSummary = true;
+    $method = new ReflectionMethod($f->adapter, 'invoiceSummary');
+    if (\PHP_VERSION_ID < 80100) {
+        $method->setAccessible(true);
+    }
+    $probe = new RefundIntent(array(
+        'operation_id' => RefundIntentStore::uuid(),
+        'request_token' => RefundIntentStore::uuid(),
+        'installation_id' => $f->store->installationId(),
+        'platform' => 'whmcs',
+        'native_payment_key' => '42',
+        'invoice_id' => 'inv_123',
+        'project_id' => 'prj_123',
+        'environment' => 'sandbox',
+        'mode' => RefundStates::OVERPAYMENT,
+    ));
+    $fallback = $method->invoke($f->adapter, array('invoice_id' => 'inv_123', 'status' => 'paid_over',
+        'payment' => array('paid' => '120', 'currency' => 'USDT', 'network' => 'TRC20')), $probe);
+    assertSameValue(null, $fallback['full_refund_amount'], 'gross must not be treated as full refund balance.');
+    assertSameValue(null, $fallback['overpayment_refund_amount'], 'gross must not be treated as overpayment refund balance.');
+    assertSameValue(true, $fallback['can_refund_full'], 'paid_over enables full refund when summary is omitted.');
+    assertSameValue(true, $fallback['can_refund_overpayment'], 'paid_over enables initial overpayment when summary is omitted.');
+
+    $over = $f->adapter->submit(whmcs_refund_input('overpayment'));
+    assertSameValue(RefundStates::CREATED, $over->cashState(), 'initial overpayment proceeds without refund_summary.');
+    $f->server->refunds[$over->externalOrderId()]['status'] = 'completed';
+    $f->adapter->reconcile($over->operationId());
+    $postsBefore = count(array_filter($f->server->requests, static function ($r) { return $r['method'] === 'POST'; }));
+
+    whmcs_refund_throws(static function () use ($f) {
+        $f->adapter->submit(whmcs_refund_input('overpayment'));
+    }, 'refund_mode_unavailable');
+    $postsAfter = count(array_filter($f->server->requests, static function ($r) { return $r['method'] === 'POST'; }));
+    assertSameValue($postsBefore, $postsAfter, 'completed overpayment blocks a second overpayment before POST when summary is omitted.');
+
+    $full = $f->adapter->submit(whmcs_refund_input('full'));
+    assertSameValue(RefundStates::CREATED, $full->cashState(), 'full refund remains eligible after completed overpayment when summary is omitted.');
+}
+
+function test_whmcs_refund_preflight_transient_failures_return_retry_and_deterministic_errors_preserve_code()
+{
+    foreach (array(429, 502, new RuntimeException('read timeout')) as $failure) {
+        $f = whmcs_refund_fixture();
+        $input = whmcs_refund_input('full');
+        $draftMethod = new ReflectionMethod($f->adapter, 'draft');
+        if (\PHP_VERSION_ID < 80100) {
+            $draftMethod->setAccessible(true);
+        }
+        $draft = $draftMethod->invoke($f->adapter, $f->native->snapshot);
+        $probe = new RefundIntent(array(
+            'operation_id' => RefundIntentStore::uuid(),
+            'request_token' => RefundIntentStore::uuid(),
+            'installation_id' => $f->store->installationId(),
+            'platform' => 'whmcs',
+            'native_payment_key' => '42',
+            'invoice_id' => 'inv_123',
+            'project_id' => 'prj_123',
+            'environment' => 'sandbox',
+            'mode' => RefundStates::FULL,
+            'full_draft' => $draft,
+        ));
+        $f->server->invoiceFailure = $failure;
+        $reason = $f->store->withPaymentLock('42', static function () use ($f, $probe) {
+            return $f->adapter->preflight($probe);
+        });
+        assertSameValue(\Paymos\Plugin\NativeRefundProjectorInterface::PREFLIGHT_RETRY, $reason, 'transient invoice read error returns PREFLIGHT_RETRY.');
+
+        $f->server->invoiceFailure = $failure;
+        whmcs_refund_throws(static function () use ($f, $input) {
+            $f->adapter->submit($input);
+        }, 'refund_preflight_unavailable');
+        assertSameValue(0, count($f->db->intents), 'submit maps PREFLIGHT_RETRY to refund_preflight_unavailable without creating an intent.');
+        assertSameValue(0, count($f->server->refunds), 'unavailable preflight sends no refund POST.');
+
+        $recovered = $f->adapter->submit($input);
+        assertSameValue(RefundStates::CREATED, $recovered->cashState(), 'submit succeeds after preflight read recovers.');
+
+        $f2 = whmcs_refund_fixture();
+        $savedToken = RefundIntentStore::uuid();
+        $savedProbe = new RefundIntent(array(
+            'operation_id' => RefundIntentStore::uuid(),
+            'request_token' => $savedToken,
+            'installation_id' => $f2->store->installationId(),
+            'platform' => 'whmcs',
+            'native_payment_key' => '42',
+            'invoice_id' => 'inv_123',
+            'project_id' => 'prj_123',
+            'environment' => 'sandbox',
+            'mode' => RefundStates::FULL,
+            'full_draft' => $draft,
+        ));
+        $saved = $f2->store->withPaymentLock('42', static function () use ($f2, $savedProbe) {
+            return $f2->store->createIntent($savedProbe);
+        });
+        $replayInput = whmcs_refund_input('full');
+        $replayInput['request_token'] = $savedToken;
+        $f2->server->invoiceFailure = $failure;
+        $pending = $f2->adapter->submit($replayInput);
+        assertSameValue(RefundStates::NOT_SUBMITTED, $pending->cashState(), 'coordinator keeps NOT_SUBMITTED on PREFLIGHT_RETRY.');
+        assertSameValue(0, count($f2->server->refunds), 'no POST while preflight read is unavailable.');
+        $done = $f2->adapter->submit($replayInput);
+        assertSameValue(RefundStates::CREATED, $done->cashState(), 'submit replay advances NOT_SUBMITTED once preflight recovers.');
+    }
+
+    foreach (array(404 => 'invoice_not_found', 400 => 'refund_denied') as $status => $expectedCode) {
+        $f = whmcs_refund_fixture();
+        $input = whmcs_refund_input('full');
+        $draftMethod = new ReflectionMethod($f->adapter, 'draft');
+        if (\PHP_VERSION_ID < 80100) {
+            $draftMethod->setAccessible(true);
+        }
+        $draft = $draftMethod->invoke($f->adapter, $f->native->snapshot);
+        $f->server->invoiceFailure = $status;
+        whmcs_refund_throws(static function () use ($f, $input) {
+            $f->adapter->submit($input);
+        }, $expectedCode);
+        assertSameValue(0, count($f->db->intents), 'deterministic API refusal does not create an intent on submit.');
+
+        $savedToken = RefundIntentStore::uuid();
+        $saved = $f->store->withPaymentLock('42', static function () use ($f, $draft, $savedToken) {
+            return $f->store->createIntent(new RefundIntent(array(
+                'operation_id' => RefundIntentStore::uuid(),
+                'request_token' => $savedToken,
+                'installation_id' => $f->store->installationId(),
+                'platform' => 'whmcs',
+                'native_payment_key' => '42',
+                'invoice_id' => 'inv_123',
+                'project_id' => 'prj_123',
+                'environment' => 'sandbox',
+                'mode' => RefundStates::FULL,
+                'full_draft' => $draft,
+            )));
+        });
+        $replayInput = whmcs_refund_input('full');
+        $replayInput['request_token'] = $savedToken;
+        $f->server->invoiceFailure = $status;
+        $after = $f->adapter->submit($replayInput);
+        assertSameValue(RefundStates::REVIEW, $after->cashState(), 'deterministic API refusal moves saved intent to review.');
+        assertSameValue($expectedCode, $after->toArray()['review_reason'], 'review preserves API errorCode.');
+    }
 }
 
 if (realpath($_SERVER['SCRIPT_FILENAME'] ?? '') === __FILE__) {
