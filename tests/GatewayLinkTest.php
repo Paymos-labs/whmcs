@@ -703,3 +703,231 @@ function test_whmcs_reconciler_skips_a_pending_create_intent()
     assertSameValue(0, (new PaymosWhmcs\Reconciler($store, $adapter, $factory))->run(whmcs_gateway_params(), time()), 'nothing is applied.');
     assertSameValue(1, count($transport->requests()), 'no GET is sent for a placeholder id.');
 }
+
+function test_whmcs_gateway_link_single_service_invoice_and_currency_guard()
+{
+    $store = new InMemoryInvoiceStore();
+    $GLOBALS['paymos_whmcs_local_api'] = static function ($command, array $values) {
+        if ($command === 'GetInvoice') {
+            return array(
+                'result' => 'success',
+                'invoiceid' => 42,
+                'userid' => 77,
+                'total' => '47.00',
+                'items' => array(
+                    'item' => array(
+                        array(
+                            'id' => '101',
+                            'type' => 'Hosting',
+                            'relid' => '55',
+                            'description' => "<b>Managed VPS</b> &amp; Support\0\n<p>4 vCPU</p><p>8 GB RAM</p>",
+                            'amount' => '24.50',
+                            'taxed' => '1',
+                        ),
+                    ),
+                ),
+            );
+        }
+        if ($command === 'GetClientsDetails') {
+            return array(
+                'result' => 'success',
+                'client' => array('currency_code' => 'USD'),
+            );
+        }
+        return array('result' => 'error', 'message' => 'Unexpected command ' . $command);
+    };
+
+    $transport = new MockTransport(array(whmcs_created_response('inv_whmcs_single')));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+    (new GatewayLink($store, static function () use ($client) {
+        return $client;
+    }, new PaymosWhmcs\WhmcsAdapter()))->render(whmcs_gateway_params(array('amount' => '47.00')));
+
+    $payload = json_decode($transport->requests()[0]['body'], true);
+    assertSameValue('47.00', $payload['amount'], 'native WHMCS amount must be kept.');
+    assertSameValue(
+        array(
+            array(
+                'title' => 'Managed VPS & Support',
+                'quantity' => 1,
+                'unit_amount' => '24.50',
+                'description' => "4 vCPU\n8 GB RAM",
+            ),
+        ),
+        $payload['products'],
+        'multiline WHMCS GetInvoice line item must map title + plain-text description.'
+    );
+
+    // Single-line item without optional description/image_url must succeed.
+    $adapter = new FakeWhmcsAdapter();
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array('id' => '102', 'type' => 'DomainRegister', 'description' => 'example.com registration', 'amount' => '12.00'),
+        ),
+    );
+    $storeMin = new InMemoryInvoiceStore();
+    $transportMin = new MockTransport(array(whmcs_created_response('inv_whmcs_min')));
+    $clientMin = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transportMin);
+
+    (new GatewayLink($storeMin, static function () use ($clientMin) {
+        return $clientMin;
+    }, $adapter))->render(whmcs_gateway_params(array('amount' => '12.00')));
+
+    $minPayload = json_decode($transportMin->requests()[0]['body'], true);
+    assertSameValue(
+        array(array('title' => 'example.com registration', 'quantity' => 1, 'unit_amount' => '12.00')),
+        $minPayload['products'],
+        'single-line WHMCS service item without description/image_url must still be sent.'
+    );
+
+    // Convert To For Processing (client currency != processing currency) must fall back to amount-only.
+    $adapter->invoiceCurrencies[42] = 'EUR';
+    $storeConverted = new InMemoryInvoiceStore();
+    $transportConverted = new MockTransport(array(whmcs_created_response('inv_whmcs_converted')));
+    $clientConverted = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transportConverted);
+
+    (new GatewayLink($storeConverted, static function () use ($clientConverted) {
+        return $clientConverted;
+    }, $adapter))->render(whmcs_gateway_params(array('amount' => '13.50', 'currency' => 'USD')));
+
+    $convertedPayload = json_decode($transportConverted->requests()[0]['body'], true);
+    assertFalseValue(array_key_exists('products', $convertedPayload), 'Convert To For Processing currency mismatch must fall back to amount-only.');
+}
+
+function test_whmcs_gateway_link_cart_excludes_promos_fees_and_applies_all_or_nothing_fallback()
+{
+    $adapter = new FakeWhmcsAdapter();
+    $adapter->invoices[42]['total'] = '42.50';
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => "Canvas · Blue\n<p>Giclée print</p>", 'amount' => '15.00', 'quantity' => 2),
+            array('id' => '2', 'type' => 'PromoHosting', 'description' => 'Promo Code: SAVE5', 'amount' => '-5.00'),
+            array('id' => '3', 'type' => 'GroupDiscount', 'description' => 'VIP Discount', 'amount' => '-2.50'),
+            array('id' => '4', 'type' => 'LateFee', 'description' => 'Late Fee', 'amount' => '2.50'),
+            array('id' => '5', 'type' => 'Tax', 'description' => 'VAT', 'amount' => '5.00'),
+            array('id' => '6', 'type' => 'Shipping', 'description' => 'Courier', 'amount' => '5.00'),
+            array('id' => '7', 'type' => 'Addon', 'description' => 'Notebook', 'amount' => '12.50'),
+        ),
+    );
+    $store = new InMemoryInvoiceStore();
+    $transport = new MockTransport(array(whmcs_created_response('inv_whmcs_cart')));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+    (new GatewayLink($store, static function () use ($client) {
+        return $client;
+    }, $adapter))->render(whmcs_gateway_params(array('amount' => '42.50')));
+
+    $payload = json_decode($transport->requests()[0]['body'], true);
+    assertSameValue('42.50', $payload['amount'], 'WHMCS native grand total must be preserved.');
+    assertSameValue(
+        array(
+            array(
+                'title' => 'Canvas · Blue',
+                'quantity' => 2,
+                'unit_amount' => '15.00',
+                'description' => 'Giclée print',
+            ),
+            array(
+                'title' => 'Notebook',
+                'quantity' => 1,
+                'unit_amount' => '12.50',
+            ),
+        ),
+        $payload['products'],
+        'WHMCS cart must exclude promo/discount/fee/tax/shipping rows and keep service items.'
+    );
+
+    // 50 items succeed; 51 items, fractional qty, blank title, and negative price fall back all-or-nothing.
+    $fifty = array();
+    for ($i = 1; $i <= 50; $i++) {
+        $fifty[] = array('id' => (string) $i, 'type' => 'Hosting', 'description' => 'Service ' . $i, 'amount' => '1.00');
+    }
+    $fiftyOne = $fifty;
+    $fiftyOne[] = array('id' => '51', 'type' => 'Hosting', 'description' => 'Service 51', 'amount' => '1.00');
+
+    $maxAdapter = new FakeWhmcsAdapter();
+    $maxAdapter->invoices[42]['items'] = array('item' => $fifty);
+    $maxTransport = new MockTransport(array(whmcs_created_response('inv_50')));
+    $maxClient = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $maxTransport);
+    (new GatewayLink(new InMemoryInvoiceStore(), static function () use ($maxClient) {
+        return $maxClient;
+    }, $maxAdapter))->render(whmcs_gateway_params(array('amount' => '50.00')));
+    $maxPayload = json_decode($maxTransport->requests()[0]['body'], true);
+    assertSameValue(50, count($maxPayload['products']), 'exactly 50 WHMCS items must be sent.');
+
+    $invalidCases = array(
+        'fractional_qty' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Valid', 'amount' => '20.00', 'quantity' => 1),
+            array('id' => '2', 'type' => 'Hosting', 'description' => 'Hours', 'amount' => '10.00', 'quantity' => 1.5),
+        ),
+        'blank_description' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Valid', 'amount' => '20.00'),
+            array('id' => '2', 'type' => '', 'description' => '<b>&nbsp;</b>', 'amount' => '5.00'),
+        ),
+        'negative_item_amount' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Valid', 'amount' => '20.00'),
+            array('id' => '2', 'type' => 'Hosting', 'description' => 'Invalid Negative', 'amount' => '-5.00'),
+        ),
+        'over_50' => $fiftyOne,
+    );
+
+    foreach ($invalidCases as $label => $items) {
+        $caseAdapter = new FakeWhmcsAdapter();
+        $caseAdapter->invoices[42]['items'] = array('item' => $items);
+        $caseTransport = new MockTransport(array(whmcs_created_response('inv_' . $label)));
+        $caseClient = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $caseTransport);
+
+        (new GatewayLink(new InMemoryInvoiceStore(), static function () use ($caseClient) {
+            return $caseClient;
+        }, $caseAdapter))->render(whmcs_gateway_params(array('amount' => '42.50')));
+
+        $casePayload = json_decode($caseTransport->requests()[0]['body'], true);
+        assertSameValue('42.50', $casePayload['amount'], $label . ': fallback preserves amount.');
+        assertFalseValue(array_key_exists('products', $casePayload), $label . ': invalid WHMCS cart reverts to amount-only.');
+    }
+}
+
+function test_whmcs_gateway_link_retry_and_metadata_change_preserve_money_guards()
+{
+    $store = new InMemoryInvoiceStore();
+    $adapter = new FakeWhmcsAdapter();
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Plan A', 'amount' => '100.00'),
+        ),
+    );
+    $transport = new MockTransport(array(
+        whmcs_created_response('inv_existing'),
+        whmcs_live_invoice_response('inv_existing', 'awaiting_client', time() + 600),
+        whmcs_live_invoice_response('inv_existing', 'cancelled', time() + 600),
+        whmcs_created_response('inv_new'),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+
+    (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params());
+
+    // Changing only line item presentation metadata with matching amount/currency reuses existing invoice.
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Plan A Renamed', 'amount' => '100.00'),
+        ),
+    );
+    $reusedHtml = (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params());
+    assertContainsValue('https://checkout.paymos.test/inv_existing', $reusedHtml, 'line item text change alone must reuse matching financial invoice.');
+
+    // Changing amount due replaces old invoice and includes updated items under bumped key.
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array('id' => '1', 'type' => 'Hosting', 'description' => 'Plan B', 'amount' => '120.00'),
+        ),
+    );
+    $replacedHtml = (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params(array('amount' => '120.00')));
+    assertContainsValue('https://checkout.paymos.test/inv_new', $replacedHtml, 'amount change must create new invoice.');
+    $requests = $transport->requests();
+    assertSameValue(array('POST', 'GET', 'POST', 'POST'), array_column($requests, 'method'), 'create, reuse check, cancel, new create.');
+    $newPayload = json_decode($requests[3]['body'], true);
+    assertSameValue('whmcs_42_1', $newPayload['external_order_id'], 'bumped key must be used.');
+    assertSameValue('Plan B', $newPayload['products'][0]['title'], 'new generation must carry current WHMCS items.');
+}

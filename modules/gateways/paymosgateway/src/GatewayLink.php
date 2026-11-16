@@ -7,6 +7,7 @@ namespace PaymosWhmcs;
 use Paymos\Client;
 use Paymos\Exception\ApiException;
 use Paymos\Exception\NotFoundException;
+use Paymos\Plugin\InvoicePresentation;
 use Paymos\Plugin\InvoiceRenewal;
 use Paymos\Plugin\InvoiceReplacement;
 use Paymos\Plugin\InvoiceReplacementBlockedException;
@@ -122,7 +123,8 @@ final class GatewayLink
 
         $renewCount = is_array($existing) && isset($existing['renew_count']) ? ((int) $existing['renew_count'] + 1) : 0;
         $externalOrderId = 'whmcs_' . $invoiceId . '_' . $renewCount;
-        $payload = $this->createPayload($params, $config, $amount, $currency, $externalOrderId);
+        $whmcsInvoice = $this->fetchWhmcsInvoice($invoiceId);
+        $payload = $this->createPayload($params, $config, $amount, $currency, $externalOrderId, $whmcsInvoice);
 
         // The operation identity (external_order_id) and every field the server
         // compares on a repeated key (project, amount, currency, environment) are
@@ -135,7 +137,7 @@ final class GatewayLink
             'environment' => $config->environment(),
             'project_id' => $config->projectId(),
             'amount' => $amount,
-            'invoice_total' => $this->invoiceTotal($invoiceId),
+            'invoice_total' => $this->invoiceTotalFromInvoice($whmcsInvoice),
             'currency' => $currency,
             'payment_url' => '',
             'status' => self::STATUS_CREATING,
@@ -229,10 +231,11 @@ final class GatewayLink
     }
 
     /**
-     * @param array<string, mixed> $params
+     * @param array<string, mixed>      $params
+     * @param array<string, mixed>|null $whmcsInvoice
      * @return array<string, mixed>
      */
-    private function createPayload(array $params, Config $config, $amount, $currency, $externalOrderId)
+    private function createPayload(array $params, Config $config, $amount, $currency, $externalOrderId, ?array $whmcsInvoice = null)
     {
         $payload = array(
             'project_id' => $config->projectId(),
@@ -246,7 +249,167 @@ final class GatewayLink
             $payload['client_id'] = $clientId;
         }
 
+        $invoiceId = (int) $this->field($params, 'invoiceid');
+        if ($whmcsInvoice === null) {
+            $whmcsInvoice = $this->fetchWhmcsInvoice($invoiceId);
+        }
+        $products = $this->extractInvoiceProducts($invoiceId, (string) $currency, $whmcsInvoice);
+        if ($products !== null) {
+            $payload['products'] = $products;
+        }
+
         return $payload;
+    }
+
+    /**
+     * @param array<string, mixed> $invoice
+     * @return array<int, array<string, mixed>>|null
+     */
+    private function extractInvoiceProducts(int $invoiceId, string $currency, array $invoice): ?array
+    {
+        if ($invoiceId <= 0 || count($invoice) === 0 || !isset($invoice['items']) || !is_array($invoice['items'])) {
+            return null;
+        }
+
+        try {
+            $nativeCurrency = strtoupper(trim((string) $this->whmcs->invoiceCurrency($invoiceId)));
+        } catch (\RuntimeException $e) {
+            return null;
+        }
+        if ($nativeCurrency === '' || $nativeCurrency !== strtoupper(trim($currency))) {
+            // Convert To For Processing is active: invoice line items use client currency,
+            // while Paymos invoice amount uses the gateway processing currency.
+            return null;
+        }
+
+        if (array_key_exists('item', $invoice['items'])) {
+            if (!is_array($invoice['items']['item'])) {
+                return null;
+            }
+            $rawItems = $invoice['items']['item'];
+            if (isset($rawItems['id']) || isset($rawItems['description']) || isset($rawItems['type'])) {
+                $rawItems = array($rawItems);
+            }
+        } else {
+            $rawItems = $invoice['items'];
+        }
+
+        if (!is_array($rawItems) || count($rawItems) === 0) {
+            return null;
+        }
+
+        $candidates = array();
+        foreach ($rawItems as $item) {
+            if (!is_array($item)) {
+                return null;
+            }
+            if ($this->isExcludedLineItem($item)) {
+                continue;
+            }
+
+            if (array_key_exists('title', $item)) {
+                $title = is_string($item['title']) ? $item['title'] : null;
+                $description = isset($item['description']) && is_string($item['description']) ? $item['description'] : null;
+            } else {
+                $rawDescription = isset($item['description']) && is_string($item['description']) ? $item['description'] : null;
+                if ($rawDescription === null) {
+                    $title = null;
+                    $description = null;
+                } else {
+                    $lines = explode("\n", str_replace(array("\r\n", "\r"), "\n", $rawDescription));
+                    $title = array_shift($lines);
+                    $rest = trim(implode("\n", $lines));
+                    $description = $rest !== '' ? $rest : null;
+                }
+            }
+
+            $quantity = array_key_exists('quantity', $item)
+                ? $item['quantity']
+                : (array_key_exists('qty', $item) ? $item['qty'] : 1);
+            $rawUnitAmount = array_key_exists('unit_amount', $item)
+                ? $item['unit_amount']
+                : (array_key_exists('amount', $item) ? $item['amount'] : null);
+
+            $candidates[] = array(
+                'title' => $title,
+                'description' => $description,
+                'image_url' => isset($item['image_url']) && is_string($item['image_url']) ? $item['image_url'] : null,
+                'quantity' => $quantity,
+                'unit_amount' => self::formatUnitAmount($rawUnitAmount),
+            );
+        }
+
+        return InvoicePresentation::normalizeProducts($candidates);
+    }
+
+    /**
+     * @param array<string, mixed> $item
+     */
+    private function isExcludedLineItem(array $item): bool
+    {
+        $type = isset($item['type']) && is_scalar($item['type']) ? strtolower(trim((string) $item['type'])) : '';
+        if ($type === '') {
+            return false;
+        }
+
+        $excluded = array(
+            'promohosting',
+            'promodomain',
+            'groupdiscount',
+            'discount',
+            'latefee',
+            'domaingracefee',
+            'domainredemptionfee',
+            'fee',
+            'paymentfee',
+            'gatewayfee',
+            'tax',
+            'shipping',
+        );
+        if (in_array($type, $excluded, true)) {
+            return true;
+        }
+
+        return strncmp($type, 'promo', 5) === 0 || substr($type, -8) === 'discount';
+    }
+
+    /**
+     * @param mixed $raw
+     */
+    private static function formatUnitAmount($raw): ?string
+    {
+        if (is_int($raw)) {
+            return (string) $raw;
+        }
+        if (is_float($raw)) {
+            if (!is_finite($raw)) {
+                return null;
+            }
+            if ($raw < 0) {
+                return '-1';
+            }
+            $formatted = (string) $raw;
+            if (stripos($formatted, 'e') !== false) {
+                $formatted = rtrim(rtrim(sprintf('%.18F', $raw), '0'), '.');
+            }
+            return $formatted;
+        }
+        if (!is_string($raw)) {
+            return null;
+        }
+
+        $trimmed = trim($raw);
+        if ($trimmed === '') {
+            return null;
+        }
+        if (preg_match('/\A(0|[1-9][0-9]*)\.([0-9]+)\z/', $trimmed, $m) === 1) {
+            $frac = rtrim($m[2], '0');
+            if (strlen($m[2]) > 2 && strlen($frac) <= 2) {
+                return $m[1] . '.' . str_pad($frac, 2, '0');
+            }
+        }
+
+        return $trimmed;
     }
 
     /**
@@ -399,18 +562,37 @@ final class GatewayLink
      * paid balance to manual review. Empty when WHMCS cannot say (the callback
      * then falls back to comparing the amount due with the total).
      */
-    private function invoiceTotal($invoiceId)
+    /**
+     * @return array<string, mixed>
+     */
+    private function fetchWhmcsInvoice(int $invoiceId): array
     {
+        if ($invoiceId <= 0) {
+            return array();
+        }
         try {
             $invoice = $this->whmcs->getInvoice($invoiceId);
+            return is_array($invoice) ? $invoice : array();
         } catch (\RuntimeException $e) {
-            return '';
+            return array();
         }
+    }
+
+    /**
+     * @param array<string, mixed> $invoice
+     */
+    private function invoiceTotalFromInvoice(array $invoice): string
+    {
         if (isset($invoice['total']) && is_scalar($invoice['total']) && is_numeric(trim((string) $invoice['total']))) {
             return $this->amount($invoice['total']);
         }
 
         return '';
+    }
+
+    private function invoiceTotal($invoiceId)
+    {
+        return $this->invoiceTotalFromInvoice($this->fetchWhmcsInvoice((int) $invoiceId));
     }
 
     private function amount($amount)
