@@ -759,7 +759,7 @@ function test_whmcs_gateway_link_single_service_invoice_and_currency_guard()
         'multiline WHMCS GetInvoice line item must map title + plain-text description.'
     );
 
-    // Single-line item without optional description/image_url must succeed.
+    // Single-line item without optional description must succeed.
     $adapter = new FakeWhmcsAdapter();
     $adapter->invoices[42]['items'] = array(
         'item' => array(
@@ -778,7 +778,7 @@ function test_whmcs_gateway_link_single_service_invoice_and_currency_guard()
     assertSameValue(
         array(array('title' => 'example.com registration', 'quantity' => 1, 'unit_amount' => '12.00')),
         $minPayload['products'],
-        'single-line WHMCS service item without description/image_url must still be sent.'
+        'single-line WHMCS service item without description must still be sent.'
     );
 
     // Convert To For Processing (client currency != processing currency) must fall back to amount-only.

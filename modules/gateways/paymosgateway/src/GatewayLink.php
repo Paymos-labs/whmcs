@@ -333,7 +333,6 @@ final class GatewayLink
             $candidates[] = array(
                 'title' => $title,
                 'description' => $description,
-                'image_url' => isset($item['image_url']) && is_string($item['image_url']) ? $item['image_url'] : null,
                 'quantity' => $quantity,
                 'unit_amount' => self::formatUnitAmount($rawUnitAmount),
             );
