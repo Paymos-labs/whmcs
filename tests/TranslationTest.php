@@ -231,7 +231,7 @@ namespace {
         } finally {
             if ($hadSessionLanguage) {
                 $_SESSION['Language'] = $previousSessionLanguage;
-            } else {
+            } elseif (isset($_SESSION) && is_array($_SESSION)) {
                 unset($_SESSION['Language']);
             }
             FakeWhmcsCapsuleState::reset();
@@ -250,7 +250,9 @@ namespace {
         $previousSessionLanguage = $hadSessionLanguage ? $_SESSION['Language'] : null;
 
         try {
-            unset($_SESSION['adminid'], $_SESSION['Language']);
+            if (isset($_SESSION) && is_array($_SESSION)) {
+                unset($_SESSION['adminid'], $_SESSION['Language']);
+            }
             FakeWhmcsCapsuleState::reset();
             \WHMCS\User\Admin::reset();
 
@@ -326,12 +328,12 @@ namespace {
         } finally {
             if ($hadAdminId) {
                 $_SESSION['adminid'] = $previousAdminId;
-            } else {
+            } elseif (isset($_SESSION) && is_array($_SESSION)) {
                 unset($_SESSION['adminid']);
             }
             if ($hadSessionLanguage) {
                 $_SESSION['Language'] = $previousSessionLanguage;
-            } else {
+            } elseif (isset($_SESSION) && is_array($_SESSION)) {
                 unset($_SESSION['Language']);
             }
             FakeWhmcsCapsuleState::reset();

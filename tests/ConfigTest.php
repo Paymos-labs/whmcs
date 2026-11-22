@@ -189,7 +189,9 @@ function test_whmcs_module_config_renders_visible_connection_row_and_localizes_f
     $previousSessionLanguage = $hadSessionLanguage ? $_SESSION['Language'] : null;
 
     try {
-        unset($_SESSION['adminid'], $_SESSION['Language']);
+        if (isset($_SESSION) && is_array($_SESSION)) {
+            unset($_SESSION['adminid'], $_SESSION['Language']);
+        }
         Config::resetForTests();
         if (class_exists('FakeWhmcsCapsuleState')) {
             FakeWhmcsCapsuleState::reset();
@@ -314,12 +316,12 @@ function test_whmcs_module_config_renders_visible_connection_row_and_localizes_f
     } finally {
         if ($hadAdminId) {
             $_SESSION['adminid'] = $previousAdminId;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['adminid']);
         }
         if ($hadSessionLanguage) {
             $_SESSION['Language'] = $previousSessionLanguage;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['Language']);
         }
         Config::resetForTests();

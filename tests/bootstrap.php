@@ -40,6 +40,9 @@ if (!function_exists('localAPI')) {
 if (!defined('WHMCS')) {
     define('WHMCS', true);
 }
+if (!isset($_SESSION) || !is_array($_SESSION)) {
+    $_SESSION = array();
+}
 
 define('PAYMOS_WHMCS_PLUGIN_DIR', dirname(__DIR__) . DIRECTORY_SEPARATOR);
 

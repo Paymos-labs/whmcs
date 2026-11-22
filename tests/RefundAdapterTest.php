@@ -763,7 +763,9 @@ function test_whmcs_refund_panel_hides_irrelevant_buttons_localizes_and_surfaces
     $previousAdminId = $hadAdminId ? $_SESSION['adminid'] : null;
 
     try {
-        unset($_SESSION['Language'], $_SESSION['adminid']);
+        if (isset($_SESSION) && is_array($_SESSION)) {
+            unset($_SESSION['Language'], $_SESSION['adminid']);
+        }
         if (class_exists('FakeWhmcsCapsuleState')) {
             FakeWhmcsCapsuleState::reset();
         }
@@ -854,12 +856,12 @@ function test_whmcs_refund_panel_hides_irrelevant_buttons_localizes_and_surfaces
     } finally {
         if ($hadLanguage) {
             $_SESSION['Language'] = $previousLanguage;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['Language']);
         }
         if ($hadAdminId) {
             $_SESSION['adminid'] = $previousAdminId;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['adminid']);
         }
         if (class_exists('FakeWhmcsCapsuleState')) {
@@ -879,7 +881,9 @@ function test_whmcs_refund_native_entry_logs_failure_reason_when_cash_failed()
     $previousAdminId = $hadAdminId ? $_SESSION['adminid'] : null;
 
     try {
-        unset($_SESSION['Language'], $_SESSION['adminid']);
+        if (isset($_SESSION) && is_array($_SESSION)) {
+            unset($_SESSION['Language'], $_SESSION['adminid']);
+        }
         if (class_exists('FakeWhmcsCapsuleState')) {
             FakeWhmcsCapsuleState::reset();
         }
@@ -933,12 +937,12 @@ function test_whmcs_refund_native_entry_logs_failure_reason_when_cash_failed()
     } finally {
         if ($hadLanguage) {
             $_SESSION['Language'] = $previousLanguage;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['Language']);
         }
         if ($hadAdminId) {
             $_SESSION['adminid'] = $previousAdminId;
-        } else {
+        } elseif (isset($_SESSION) && is_array($_SESSION)) {
             unset($_SESSION['adminid']);
         }
         if (class_exists('FakeWhmcsCapsuleState')) {
