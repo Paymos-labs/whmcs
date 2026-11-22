@@ -781,18 +781,60 @@ function test_whmcs_gateway_link_single_service_invoice_and_currency_guard()
         'single-line WHMCS service item without description must still be sent.'
     );
 
-    // Convert To For Processing (client currency != processing currency) must fall back to amount-only.
+    // Convert To For Processing (client currency != processing currency) must fail closed with 0 HTTP requests.
     $adapter->invoiceCurrencies[42] = 'EUR';
+    $adapter->logs = array();
     $storeConverted = new InMemoryInvoiceStore();
-    $transportConverted = new MockTransport(array(whmcs_created_response('inv_whmcs_converted')));
+    $transportConverted = new MockTransport(array());
     $clientConverted = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transportConverted);
+    $convertedParams = whmcs_gateway_params(array('amount' => '13.50', 'currency' => 'USD'));
 
-    (new GatewayLink($storeConverted, static function () use ($clientConverted) {
-        return $clientConverted;
-    }, $adapter))->render(whmcs_gateway_params(array('amount' => '13.50', 'currency' => 'USD')));
+    $mismatch = null;
+    try {
+        (new GatewayLink($storeConverted, static function () use ($clientConverted) {
+            return $clientConverted;
+        }, $adapter))->render($convertedParams);
+    } catch (\PaymosWhmcs\CurrencyMismatchException $e) {
+        $mismatch = $e;
+    }
 
-    $convertedPayload = json_decode($transportConverted->requests()[0]['body'], true);
-    assertFalseValue(array_key_exists('products', $convertedPayload), 'Convert To For Processing currency mismatch must fall back to amount-only.');
+    assertTrueValue($mismatch instanceof \PaymosWhmcs\CurrencyMismatchException, 'Convert To For Processing currency mismatch must throw CurrencyMismatchException.');
+    assertSameValue('EUR', $mismatch->invoiceCurrency(), 'exception must report native WHMCS invoice currency.');
+    assertSameValue('USD', $mismatch->processingCurrency(), 'exception must report gateway processing currency.');
+    assertSameValue(0, count($transportConverted->requests()), 'Convert To For Processing currency mismatch must fail closed with 0 HTTP requests.');
+    assertSameValue(null, $storeConverted->findByWhmcsInvoiceId(42), 'currency mismatch must not store a Paymos invoice snapshot.');
+    assertSameValue(1, count($adapter->logs), 'currency mismatch must log a gateway entry for the administrator.');
+    assertContainsValue('Currency mismatch: disable Convert To For Processing', $adapter->logs[0]['status'], 'gateway log must instruct admin to disable Convert To For Processing.');
+    assertSameValue(
+        '<div class="alert alert-danger">' . htmlspecialchars(\PaymosWhmcs\Translation::text('payment_cannot_be_used', $convertedParams), ENT_QUOTES, 'UTF-8') . '</div>',
+        GatewayLink::failureNotice($mismatch, $convertedParams),
+        'failureNotice must render payment_cannot_be_used for CurrencyMismatchException.'
+    );
+    $ruConvertedParams = whmcs_gateway_params(array(
+        'amount' => '13.50',
+        'currency' => 'USD',
+        'clientdetails' => array('language' => 'russian'),
+    ));
+    assertSameValue(
+        '<div class="alert alert-danger">' . htmlspecialchars(\PaymosWhmcs\Translation::text('payment_cannot_be_used', $ruConvertedParams), ENT_QUOTES, 'UTF-8') . '</div>',
+        GatewayLink::failureNotice($mismatch, $ruConvertedParams),
+        'failureNotice must localize payment_cannot_be_used for non-English clients.'
+    );
+
+    // Even when an existing snapshot is present, currency mismatch must fail closed before lookup/cancel/create.
+    $storeExistingMismatch = whmcs_store_with_existing_link('awaiting_client');
+    $transportExistingMismatch = new MockTransport(array());
+    $clientExistingMismatch = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transportExistingMismatch);
+    $existingMismatch = null;
+    try {
+        (new GatewayLink($storeExistingMismatch, static function () use ($clientExistingMismatch) {
+            return $clientExistingMismatch;
+        }, $adapter))->render($convertedParams);
+    } catch (\PaymosWhmcs\CurrencyMismatchException $e) {
+        $existingMismatch = $e;
+    }
+    assertTrueValue($existingMismatch instanceof \PaymosWhmcs\CurrencyMismatchException, 'currency mismatch with existing row must throw CurrencyMismatchException.');
+    assertSameValue(0, count($transportExistingMismatch->requests()), 'currency mismatch with existing row must make 0 HTTP requests.');
 }
 
 function test_whmcs_gateway_link_cart_excludes_promos_fees_and_applies_all_or_nothing_fallback()
@@ -965,4 +1007,178 @@ function test_whmcs_gateway_link_formats_float_unit_amounts_locale_independently
             setlocale(LC_NUMERIC, $previousLocale);
         }
     }
+}
+
+function test_whmcs_gateway_link_blocks_renewal_after_paid_late_marker_and_remote_paid_late_at()
+{
+    // 1. Local paid_late_noted marker on an expired row blocks immediately with 0 HTTP requests.
+    $markedStore = new InMemoryInvoiceStore();
+    $markedStore->save(array(
+        'whmcs_invoice_id' => 42,
+        'paymos_invoice_id' => 'inv_late_local',
+        'external_order_id' => 'whmcs_42_0',
+        'environment' => 'sandbox',
+        'project_id' => 'prj_123',
+        'amount' => '100.00',
+        'currency' => 'USD',
+        'payment_url' => 'https://checkout.paymos.test/inv_late_local',
+        'status' => 'expired',
+        'renew_count' => 0,
+        'paid_late_noted' => 'evt_late_local',
+    ));
+    $markedAdapter = new FakeWhmcsAdapter();
+    $markedTransport = new MockTransport(array());
+    $markedClient = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $markedTransport);
+
+    $blockedLocal = whmcs_render_expecting_block(new GatewayLink($markedStore, static function () use ($markedClient) {
+        return $markedClient;
+    }, $markedAdapter), whmcs_gateway_params());
+
+    assertSameValue(\Paymos\Plugin\InvoiceReplacementResult::REASON_PAID, $blockedLocal->result()->reason(), 'local paid_late_noted must block with REASON_PAID.');
+    assertSameValue(0, count($markedTransport->requests()), 'local paid_late_noted must not call Paymos API.');
+    assertSameValue(null, $markedStore->findByExternalOrderId('whmcs_42_1'), 'local paid_late_noted must never create a replacement invoice.');
+    assertSameValue(1, count($markedAdapter->logs), 'local paid_late_noted must log manual review.');
+    assertContainsValue('Manual review', $markedAdapter->logs[0]['status'], 'local paid_late_noted log must say Manual review.');
+    assertSameValue(
+        '<div class="alert alert-danger">' . htmlspecialchars(\PaymosWhmcs\Translation::text('replacement_blocked', whmcs_gateway_params()), ENT_QUOTES, 'UTF-8') . '</div>',
+        GatewayLink::failureNotice($blockedLocal, whmcs_gateway_params()),
+        'failureNotice must render replacement_blocked for paid_late block.'
+    );
+
+    // 2. Remote GET /v1/invoices/{id} inside keepsExistingInvoice() returning paid_late_at
+    //    records paid_late_noted and blocks renewal without cancelling or creating a second invoice.
+    $keepStore = whmcs_store_with_existing_link('awaiting_client');
+    $keepAdapter = new FakeWhmcsAdapter();
+    $keepTransport = new MockTransport(array(
+        new HttpResponse(200, json_encode(array(
+            'invoice_id' => 'inv_existing',
+            'project_id' => 'prj_123',
+            'status' => 'expired',
+            'is_test' => true,
+            'is_final' => true,
+            'payment_url' => 'https://checkout.paymos.test/existing',
+            'expires_at' => time() - 3600,
+            'paid_late_at' => 1777978800,
+            'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
+        )), array()),
+    ));
+    $keepClient = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $keepTransport);
+    $keepLink = new GatewayLink($keepStore, static function () use ($keepClient) {
+        return $keepClient;
+    }, $keepAdapter);
+
+    $blockedKeep = whmcs_render_expecting_block($keepLink, whmcs_gateway_params());
+
+    assertSameValue(\Paymos\Plugin\InvoiceReplacementResult::REASON_PAID, $blockedKeep->result()->reason(), 'remote paid_late_at in keepsExistingInvoice must block with REASON_PAID.');
+    assertSameValue(array('GET'), array_column($keepTransport->requests(), 'method'), 'keepsExistingInvoice must stop after the single GET without cancel or create.');
+    assertSameValue('1777978800', $keepStore->findByWhmcsInvoiceId(42)['paid_late_noted'], 'keepsExistingInvoice must persist paid_late_noted.');
+    assertSameValue(null, $keepStore->findByExternalOrderId('whmcs_42_1'), 'remote paid_late_at must not issue a replacement invoice.');
+    assertSameValue(1, count($keepAdapter->logs), 'keepsExistingInvoice paid_late must log manual review.');
+    assertContainsValue('Manual review', $keepAdapter->logs[0]['status'], 'keepsExistingInvoice log must say Manual review.');
+
+    // Subsequent render hits the persisted paid_late_noted marker with 0 extra HTTP requests.
+    whmcs_render_expecting_block($keepLink, whmcs_gateway_params());
+    assertSameValue(1, count($keepTransport->requests()), 'persisted paid_late_noted must block future renders with 0 extra HTTP requests.');
+
+    // 3. Amount change routes through closeBeforeReplacing(): cancel returns 409 and GET returns
+    //    status=expired with paid_late_at. The proxy intercepts paid_late_at with 0 extra HTTP
+    //    requests beyond cancel+get and blocks replacement instead of creating whmcs_42_1.
+    $replaceStore = whmcs_store_with_existing_link('awaiting_client');
+    $replaceAdapter = new FakeWhmcsAdapter();
+    $replaceTransport = new MockTransport(array(
+        whmcs_problem(409, 'invoice_cannot_be_cancelled', 'Invoice cannot be cancelled in status expired.'),
+        new HttpResponse(200, json_encode(array(
+            'invoice_id' => 'inv_existing',
+            'project_id' => 'prj_123',
+            'status' => 'expired',
+            'is_test' => true,
+            'is_final' => true,
+            'payment_url' => 'https://checkout.paymos.test/existing',
+            'expires_at' => time() - 3600,
+            'paid_late_at' => 1777978800,
+            'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
+        )), array()),
+    ));
+    $replaceClient = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $replaceTransport);
+
+    $blockedReplace = whmcs_render_expecting_block(new GatewayLink($replaceStore, static function () use ($replaceClient) {
+        return $replaceClient;
+    }, $replaceAdapter), whmcs_gateway_params(array('amount' => '120.00')));
+
+    assertSameValue(\Paymos\Plugin\InvoiceReplacementResult::REASON_PAID, $blockedReplace->result()->reason(), 'closeBeforeReplacing must block remote paid_late_at with REASON_PAID.');
+    assertSameValue(array('POST', 'GET'), array_column($replaceTransport->requests(), 'method'), 'closeBeforeReplacing must make only cancel + get and 0 extra HTTP requests.');
+    assertSameValue('1777978800', $replaceStore->findByWhmcsInvoiceId(42)['paid_late_noted'], 'closeBeforeReplacing must persist paid_late_noted.');
+    assertSameValue('whmcs_42_0', $replaceStore->findByWhmcsInvoiceId(42)['external_order_id'], 'closeBeforeReplacing must keep the original external_order_id.');
+    assertSameValue(null, $replaceStore->findByExternalOrderId('whmcs_42_1'), 'closeBeforeReplacing must not create whmcs_42_1 after paid_late.');
+    assertSameValue(1, count($replaceAdapter->logs), 'closeBeforeReplacing paid_late must log manual review.');
+    assertContainsValue('Manual review', $replaceAdapter->logs[0]['status'], 'closeBeforeReplacing log must say Manual review.');
+}
+
+function test_whmcs_gateway_link_recover_pending_intent_preserves_products()
+{
+    $store = new InMemoryInvoiceStore();
+    $store->save(array(
+        'whmcs_invoice_id' => 42,
+        'paymos_invoice_id' => 'pending:whmcs_42_0',
+        'external_order_id' => 'whmcs_42_0',
+        'environment' => 'sandbox',
+        'project_id' => 'prj_123',
+        'amount' => '100.00',
+        'invoice_total' => '100.00',
+        'currency' => 'USD',
+        'payment_url' => '',
+        'status' => GatewayLink::STATUS_CREATING,
+        'renew_count' => 0,
+    ));
+
+    $adapter = new FakeWhmcsAdapter();
+    $adapter->invoices[42]['items'] = array(
+        'item' => array(
+            array(
+                'id' => '1',
+                'type' => 'Hosting',
+                'description' => "Cloud VPS\n4 vCPU / 8 GB RAM",
+                'amount' => '75.00',
+            ),
+            array(
+                'id' => '2',
+                'type' => 'Addon',
+                'description' => 'Daily Backups',
+                'amount' => '25.00',
+            ),
+        ),
+    );
+
+    $transport = new MockTransport(array(
+        whmcs_created_response('inv_recovered_products'),
+        whmcs_live_invoice_response('inv_recovered_products', 'awaiting_client', time() + 600),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+    $html = (new GatewayLink($store, static function () use ($client) {
+        return $client;
+    }, $adapter))->render(whmcs_gateway_params());
+
+    assertContainsValue('https://checkout.paymos.test/inv_recovered_products', $html, 'recovered invoice must render its checkout link.');
+    $requests = $transport->requests();
+    assertSameValue(array('POST', 'GET'), array_column($requests, 'method'), 'recovery replays POST /v1/invoices and verifies liveness.');
+    $replayPayload = json_decode($requests[0]['body'], true);
+    assertSameValue('whmcs_42_0', $replayPayload['external_order_id'], 'replay must keep original external_order_id.');
+    assertSameValue(
+        array(
+            array(
+                'title' => 'Cloud VPS',
+                'quantity' => 1,
+                'unit_amount' => '75.00',
+                'description' => '4 vCPU / 8 GB RAM',
+            ),
+            array(
+                'title' => 'Daily Backups',
+                'quantity' => 1,
+                'unit_amount' => '25.00',
+            ),
+        ),
+        isset($replayPayload['products']) ? $replayPayload['products'] : null,
+        'recoverPendingIntent() must preserve WHMCS invoice line items in products[].'
+    );
 }

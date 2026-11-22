@@ -46,6 +46,9 @@ final class Reconciler
                     $this->whmcs->logTransaction('paymosgateway', array('invoice' => $invoice), 'Snapshot mismatch');
                     continue;
                 }
+                if (StatusMapper::invoiceAction('', $this->field($invoice, array('status'))) === StatusMapper::ACTION_IGNORE) {
+                    continue;
+                }
 
                 $applied = (new CallbackProcessor($this->whmcs, $this->store, new InMemoryEventStore(), $this->clientFactory))
                     ->applyTrustedInvoice($invoice, $row, $gatewayParams, $now);
@@ -71,8 +74,7 @@ final class Reconciler
         return $this->matches((string) $row['project_id'], $this->field($invoice, array('project_id')))
             && $this->matches((string) $row['external_order_id'], $this->field($invoice, array('order', 'external_id')))
             && $this->amountMatches((string) $row['amount'], $this->field($invoice, array('order', 'amount')))
-            && $this->matches(strtoupper((string) $row['currency']), strtoupper($this->field($invoice, array('order', 'currency'))))
-            && StatusMapper::invoiceAction('', $this->field($invoice, array('status'))) !== StatusMapper::ACTION_IGNORE;
+            && $this->matches(strtoupper((string) $row['currency']), strtoupper($this->field($invoice, array('order', 'currency'))));
     }
 
     private function matches($expected, $actual)

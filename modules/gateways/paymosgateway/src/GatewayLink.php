@@ -11,6 +11,7 @@ use Paymos\Plugin\InvoicePresentation;
 use Paymos\Plugin\InvoiceRenewal;
 use Paymos\Plugin\InvoiceReplacement;
 use Paymos\Plugin\InvoiceReplacementBlockedException;
+use Paymos\Plugin\InvoiceReplacementResult;
 use Paymos\Plugin\StatusMapper;
 
 final class GatewayLink
@@ -48,6 +49,12 @@ final class GatewayLink
             // would send the client to another gateway on this invoice, so they
             // are asked to contact the store instead (BUG-180).
             return self::alert(Translation::text('replacement_blocked', $params));
+        }
+
+        if ($e instanceof CurrencyMismatchException) {
+            // assertNoProcessingCurrencyMismatch() already logged the gateway
+            // configuration mismatch for the administrator.
+            return self::alert(Translation::text('payment_cannot_be_used', $params));
         }
 
         if ($e instanceof ApiException) {
@@ -111,6 +118,12 @@ final class GatewayLink
             // operation first; only the invoice it yields may be replaced.
             $existing = $this->recoverPendingIntent($params, $existing, $config);
         }
+
+        if (is_array($existing) && !empty($existing['paid_late_noted'])) {
+            $this->blockPaidLate($existing, 'Paymos invoice was paid late and requires manual review.');
+        }
+
+        $this->assertNoProcessingCurrencyMismatch($invoiceId, $currency);
 
         if (is_array($existing) && $this->snapshotMatches($existing, $amount, $currency, $config)
             && $this->keepsExistingInvoice($existing, $config)) {
@@ -196,6 +209,13 @@ final class GatewayLink
         $clientId = $this->clientId($params);
         if ($clientId !== '') {
             $payload['client_id'] = $clientId;
+        }
+
+        $invoiceId = isset($intent['whmcs_invoice_id']) ? (int) $intent['whmcs_invoice_id'] : 0;
+        $whmcsInvoice = $this->fetchWhmcsInvoice($invoiceId);
+        $products = $this->extractInvoiceProducts($invoiceId, (string) $intent['currency'], $whmcsInvoice);
+        if ($products !== null) {
+            $payload['products'] = $products;
         }
 
         $response = $this->client($config, (string) $intent['environment'])->invoices()->create($payload);
@@ -467,6 +487,14 @@ final class GatewayLink
             return true;
         }
 
+        if (is_array($invoice) && !empty($invoice['paid_late_at'])) {
+            $row['paid_late_noted'] = is_scalar($invoice['paid_late_at'])
+                ? (string) $invoice['paid_late_at']
+                : '1';
+            $this->store->save($row);
+            $this->blockPaidLate($row, 'Paymos invoice was paid late and requires manual review.');
+        }
+
         if (!InvoiceRenewal::isRequired($invoice)) {
             return true;
         }
@@ -515,11 +543,88 @@ final class GatewayLink
      */
     private function closeBeforeReplacing(array $row, Config $config)
     {
+        if (!empty($row['paid_late_noted'])) {
+            $this->blockPaidLate($row, 'Paymos invoice was paid late and requires manual review.');
+        }
+
         $environment = (string) $row['environment'];
         $recorded = isset($row['status']) ? (string) $row['status'] : '';
-        $result = (new InvoiceReplacement(function () use ($config, $environment) {
-            return $this->client($config, $environment);
+        $observed = new \stdClass();
+        $observed->invoice = null;
+        $result = (new InvoiceReplacement(function () use ($config, $environment, $observed) {
+            $client = $this->client($config, $environment);
+
+            return new class($client, $observed) {
+                /** @var object */
+                private $client;
+
+                /** @var \stdClass */
+                private $observed;
+
+                /**
+                 * @param object $client
+                 */
+                public function __construct($client, \stdClass $observed)
+                {
+                    $this->client = $client;
+                    $this->observed = $observed;
+                }
+
+                public function invoices()
+                {
+                    return new class($this->client->invoices(), $this->observed) {
+                        /** @var object */
+                        private $invoices;
+
+                        /** @var \stdClass */
+                        private $observed;
+
+                        /**
+                         * @param object $invoices
+                         */
+                        public function __construct($invoices, \stdClass $observed)
+                        {
+                            $this->invoices = $invoices;
+                            $this->observed = $observed;
+                        }
+
+                        public function cancel($invoiceId, $reason)
+                        {
+                            $response = $this->invoices->cancel($invoiceId, $reason);
+                            if (is_array($response)
+                                && (!empty($response['paid_late_at'])
+                                    || !is_array($this->observed->invoice)
+                                    || empty($this->observed->invoice['paid_late_at']))) {
+                                $this->observed->invoice = $response;
+                            }
+
+                            return $response;
+                        }
+
+                        public function get($invoiceId)
+                        {
+                            $response = $this->invoices->get($invoiceId);
+                            if (is_array($response)
+                                && (!empty($response['paid_late_at'])
+                                    || !is_array($this->observed->invoice)
+                                    || empty($this->observed->invoice['paid_late_at']))) {
+                                $this->observed->invoice = $response;
+                            }
+
+                            return $response;
+                        }
+                    };
+                }
+            };
         }))->close((string) $row['paymos_invoice_id'], $recorded);
+
+        if (is_array($observed->invoice) && !empty($observed->invoice['paid_late_at'])) {
+            $row['paid_late_noted'] = is_scalar($observed->invoice['paid_late_at'])
+                ? (string) $observed->invoice['paid_late_at']
+                : '1';
+            $this->store->save($row);
+            $this->blockPaidLate($row, 'Paymos invoice was paid late and requires manual review.');
+        }
 
         if ($result->isClosed()) {
             // Record the final status before the new row exists, so the old
@@ -541,6 +646,57 @@ final class GatewayLink
         ), 'Manual review: ' . $result->summary());
 
         throw new InvoiceReplacementBlockedException($result);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private function blockPaidLate(array $row, string $detail): void
+    {
+        $result = InvoiceReplacementResult::blocked(
+            isset($row['paymos_invoice_id']) ? (string) $row['paymos_invoice_id'] : '',
+            isset($row['status']) ? (string) $row['status'] : '',
+            InvoiceReplacementResult::REASON_PAID,
+            $detail
+        );
+
+        $this->whmcs->logTransaction('paymosgateway', array(
+            'whmcs_invoice_id' => isset($row['whmcs_invoice_id']) ? (string) $row['whmcs_invoice_id'] : '',
+            'paymos_invoice_id' => $result->invoiceId(),
+            'status' => $result->status(),
+            'reason' => $result->reason(),
+            'detail' => $result->detail(),
+        ), 'Manual review: ' . $result->summary());
+
+        throw new InvoiceReplacementBlockedException($result);
+    }
+
+    private function assertNoProcessingCurrencyMismatch(int $invoiceId, string $currency): void
+    {
+        if ($invoiceId <= 0) {
+            return;
+        }
+
+        $processingCurrency = strtoupper(trim($currency));
+        if ($processingCurrency === '') {
+            return;
+        }
+
+        try {
+            $nativeCurrency = strtoupper(trim((string) $this->whmcs->invoiceCurrency($invoiceId)));
+        } catch (\RuntimeException $e) {
+            return;
+        }
+
+        if ($nativeCurrency !== '' && $nativeCurrency !== $processingCurrency) {
+            $this->whmcs->logTransaction('paymosgateway', array(
+                'whmcs_invoice_id' => (string) $invoiceId,
+                'invoice_currency' => $nativeCurrency,
+                'processing_currency' => $processingCurrency,
+            ), 'Currency mismatch: disable Convert To For Processing');
+
+            throw new CurrencyMismatchException($nativeCurrency, $processingCurrency);
+        }
     }
 
     /**

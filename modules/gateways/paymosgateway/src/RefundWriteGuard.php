@@ -17,6 +17,7 @@ final class RefundWriteGuard
         $guard = new self();
         $models = array(
             'WHMCS\\Billing\\Invoice' => 'invoiceSaving',
+            'WHMCS\\Billing\\Payment\\Transaction' => 'transactionSaving',
             'WHMCS\\Billing\\Transaction' => 'transactionSaving',
             'WHMCS\\Order\\Order' => 'orderSaving',
         );
@@ -34,7 +35,7 @@ final class RefundWriteGuard
 
     public static function withProjection(string $command, array $input, callable $action)
     {
-        if (self::$projection !== null || !in_array($command, array('AddTransaction', 'UpdateInvoice'), true)) {
+        if (self::$projection !== null || !in_array($command, array('AddTransaction', 'UpdateInvoice', 'RefundInvoicePayment'), true)) {
             self::deny();
         }
         // The grant stays in this PHP call; request parameters cannot supply it.
@@ -70,11 +71,12 @@ final class RefundWriteGuard
         if (isset(self::$payments[(string) $id]) && $attributes['status'] === 'Paid'
             && $model->getOriginal('status') !== 'Refunded') { return; }
         $grant = self::$projection;
-        if ($grant !== null && (string) $grant['input']['invoiceid'] === (string) $id) {
+        if ($grant !== null && (string) ($grant['input']['invoiceid'] ?? '') === (string) $id) {
             if ($grant['command'] === 'UpdateInvoice' && $attributes['status'] === 'Refunded'
                 && ($grant['input']['status'] ?? '') === 'Refunded') { return; }
             // WHMCS may recalculate the balance after the outgoing transaction.
             if ($grant['command'] === 'AddTransaction' && in_array($attributes['status'], array('Paid', 'Unpaid'), true)) { return; }
+            if ($grant['command'] === 'RefundInvoicePayment' && in_array($attributes['status'], array('Paid', 'Unpaid', 'Refunded'), true)) { return; }
         }
         self::deny();
     }
@@ -95,8 +97,9 @@ final class RefundWriteGuard
         $in = (string) ($attributes['amountin'] ?? '0');
         if ($out === '0' && strpos($in, '-') !== 0) { return; }
         $grant = self::$projection;
-        if (!$model->getOriginal('id') && $grant !== null && $grant['command'] === 'AddTransaction'
-            && !$grant['transaction_used'] && $this->matchesProjection($attributes, $grant['input'])) {
+        if (!$model->getOriginal('id') && $grant !== null
+            && in_array($grant['command'], array('AddTransaction', 'RefundInvoicePayment'), true)
+            && !$grant['transaction_used'] && $this->matchesProjection($attributes, $grant['input'], $grant['command'])) {
             self::$projection['transaction_used'] = true;
             return;
         }
@@ -141,15 +144,20 @@ final class RefundWriteGuard
         return false;
     }
 
-    private function matchesProjection(array $attributes, array $input): bool
+    private function matchesProjection(array $attributes, array $input, string $command = 'AddTransaction'): bool
     {
         foreach (array('invoiceid' => 'invoiceid', 'userid' => 'userid', 'gateway' => 'paymentmethod', 'transid' => 'transid') as $field => $key) {
             if (!isset($attributes[$field], $input[$key]) || (string) $attributes[$field] !== (string) $input[$key]) { return false; }
         }
-        foreach (array('amountin', 'amountout', 'fees') as $field) {
+        foreach (array('amountin', 'amountout') as $field) {
             if (!AmountGuard::amountsEqual((string) ($attributes[$field] ?? '0'), (string) ($input[$field] ?? '0'))) { return false; }
         }
-        return true;
+        $actualFees = (string) ($attributes['fees'] ?? '0');
+        $expectedFees = (string) ($input['fees'] ?? '0');
+        if ($command === 'RefundInvoicePayment') {
+            return AmountGuard::amountsEqual($actualFees, $expectedFees) || AmountGuard::amountsEqual($actualFees, '0');
+        }
+        return AmountGuard::amountsEqual($actualFees, $expectedFees);
     }
 
     private function changed($model, string $field, array $attributes): bool

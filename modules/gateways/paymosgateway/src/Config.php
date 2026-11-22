@@ -29,32 +29,37 @@ final class Config
      */
     public static function moduleConfig()
     {
+        $lang = Translation::adminLanguageParams();
+        $statusText = Translation::text(
+            self::hasGeneratedConfig() ? 'config_connection_connected' : 'config_connection_disconnected',
+            $lang
+        );
+
         $base = array(
             'FriendlyName' => array(
                 'Type' => 'System',
                 'Value' => 'Paymos',
             ),
             'mode' => array(
-                'FriendlyName' => 'Mode',
+                'FriendlyName' => Translation::text('config_mode_label', $lang),
                 'Type' => 'dropdown',
                 'Options' => array(
-                    'sandbox' => 'Sandbox',
-                    'live' => 'Live',
+                    'sandbox' => Translation::text('config_mode_sandbox', $lang),
+                    'live' => Translation::text('config_mode_live', $lang),
                 ),
                 'Default' => 'sandbox',
-                'Description' => 'Use Sandbox for test payments, then switch to Live when you are ready to process real orders.',
+                'Description' => Translation::text('config_mode_description', $lang),
             ),
         );
 
         return array_merge($base, array(
             'generatedConfig' => array(
-                'FriendlyName' => 'Connection',
-                'Type' => 'System',
-                'Value' => self::hasGeneratedConfig()
-                    ? 'Connected — credentials are encrypted in this WHMCS installation'
-                    : 'Not connected — click Connect Paymos and approve this installation',
+                'FriendlyName' => Translation::text('config_connection_label', $lang),
+                'Type' => '',
+                'Description' => $statusText,
+                'Value' => $statusText,
             ),
-            'buttonText' => self::buttonTextField(),
+            'buttonText' => self::buttonTextField($lang),
         ));
     }
 
@@ -248,16 +253,17 @@ final class Config
     }
 
     /**
+     * @param array<string, string> $lang
      * @return array<string, mixed>
      */
-    private static function buttonTextField()
+    private static function buttonTextField(array $lang)
     {
         return array(
-            'FriendlyName' => 'Button Text',
+            'FriendlyName' => Translation::text('config_button_text_label', $lang),
             'Type' => 'text',
             'Size' => '30',
             'Default' => 'Pay with Paymos',
-            'Description' => 'Text shown on the WHMCS invoice payment button.',
+            'Description' => Translation::text('config_button_text_description', $lang),
         );
     }
 

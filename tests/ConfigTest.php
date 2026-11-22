@@ -180,3 +180,193 @@ function test_whmcs_module_config_does_not_expose_manual_test_mode()
     assertSameValue(false, array_key_exists('liveWebhookSecret', $fields), 'WHMCS config must not expose a live webhook secret.');
     assertContainsValue('Not connected', $fields['generatedConfig']['Value'], 'WHMCS config must direct a new installation to Connect Paymos.');
 }
+
+function test_whmcs_module_config_renders_visible_connection_row_and_localizes_for_admin()
+{
+    $hadAdminId = isset($_SESSION['adminid']);
+    $previousAdminId = $hadAdminId ? $_SESSION['adminid'] : null;
+    $hadSessionLanguage = isset($_SESSION['Language']);
+    $previousSessionLanguage = $hadSessionLanguage ? $_SESSION['Language'] : null;
+
+    try {
+        unset($_SESSION['adminid'], $_SESSION['Language']);
+        Config::resetForTests();
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin')) {
+            \WHMCS\User\Admin::reset();
+        }
+
+        // Default English state before Connect.
+        $disconnected = Config::moduleConfig();
+        assertSameValue('System', $disconnected['FriendlyName']['Type'], 'FriendlyName row must remain Type=System.');
+        assertSameValue('Paymos', $disconnected['FriendlyName']['Value'], 'FriendlyName must stay Paymos.');
+        assertSameValue('Mode', $disconnected['mode']['FriendlyName'], 'Default English mode label must be Mode.');
+        assertSameValue('Sandbox', $disconnected['mode']['Options']['sandbox'], 'Default English sandbox option must be Sandbox.');
+        assertSameValue('Live', $disconnected['mode']['Options']['live'], 'Default English live option must be Live.');
+        assertSameValue('Connection', $disconnected['generatedConfig']['FriendlyName'], 'Default English Connection row label must be Connection.');
+        assertSameValue('', $disconnected['generatedConfig']['Type'], 'Connection row must use empty Type so WHMCS displays it visibly.');
+        assertSameValue(
+            'Not connected — click Connect Paymos and approve this installation',
+            $disconnected['generatedConfig']['Description'],
+            'Disconnected Connection row Description must describe how to connect.'
+        );
+        assertSameValue(
+            $disconnected['generatedConfig']['Description'],
+            $disconnected['generatedConfig']['Value'],
+            'Connection row Value must match Description for backwards compatibility.'
+        );
+        assertSameValue('Button Text', $disconnected['buttonText']['FriendlyName'], 'Default English button text label must be Button Text.');
+        assertSameValue('Pay with Paymos', $disconnected['buttonText']['Default'], 'Button text Default must remain Pay with Paymos.');
+
+        // Connected state updates both Description and Value.
+        Config::useConfigForTests(array(
+            'environments' => array(
+                'sandbox' => array(
+                    'api_key' => 'pk_test_connected',
+                    'api_secret' => 'sk_test_connected',
+                    'project_id' => 'prj_connected',
+                    'webhook_secret' => 'whsec_connected',
+                ),
+            ),
+        ));
+        $connected = Config::moduleConfig();
+        assertSameValue('', $connected['generatedConfig']['Type'], 'Connected Connection row must keep empty Type.');
+        assertSameValue(
+            'Connected — credentials are encrypted in this WHMCS installation',
+            $connected['generatedConfig']['Description'],
+            'Connected Connection row Description must reflect encrypted credentials.'
+        );
+        assertSameValue(
+            $connected['generatedConfig']['Description'],
+            $connected['generatedConfig']['Value'],
+            'Connected Connection row Value must match Description.'
+        );
+
+        // Russian administrator sees all visible settings localized while keeping Default button text.
+        Config::resetForTests();
+        $_SESSION['adminid'] = 77;
+        \WHMCS\User\Admin::$records[77] = (object) array('language' => 'russian');
+
+        $ruDisconnected = Config::moduleConfig();
+        assertSameValue('Режим', $ruDisconnected['mode']['FriendlyName'], 'Russian admin must see localized mode label.');
+        assertSameValue('Песочница', $ruDisconnected['mode']['Options']['sandbox'], 'Russian admin must see localized Sandbox option.');
+        assertSameValue('Боевой', $ruDisconnected['mode']['Options']['live'], 'Russian admin must see localized Live option.');
+        assertSameValue(
+            'Сначала проверьте тестовые оплаты в песочнице, затем переключитесь на боевой режим для реальных заказов.',
+            $ruDisconnected['mode']['Description'],
+            'Russian admin must see localized mode description.'
+        );
+        assertSameValue('Подключение', $ruDisconnected['generatedConfig']['FriendlyName'], 'Russian admin must see localized Connection label.');
+        assertSameValue('', $ruDisconnected['generatedConfig']['Type'], 'Localized Connection row must use empty Type.');
+        assertSameValue(
+            'Не подключено — нажмите «Подключить Paymos» и подтвердите установку',
+            $ruDisconnected['generatedConfig']['Description'],
+            'Russian admin must see localized disconnected status in Description.'
+        );
+        assertSameValue(
+            $ruDisconnected['generatedConfig']['Description'],
+            $ruDisconnected['generatedConfig']['Value'],
+            'Russian admin Connection row Value must match Description.'
+        );
+        assertSameValue('Текст кнопки', $ruDisconnected['buttonText']['FriendlyName'], 'Russian admin must see localized Button Text label.');
+        assertSameValue(
+            'Подпись на кнопке оплаты в счёте WHMCS.',
+            $ruDisconnected['buttonText']['Description'],
+            'Russian admin must see localized Button Text description.'
+        );
+        assertSameValue('Pay with Paymos', $ruDisconnected['buttonText']['Default'], 'Button text Default must remain English for default-override detection.');
+
+        // Connected state for Russian admin.
+        Config::useConfigForTests(array(
+            'environments' => array(
+                'sandbox' => array(
+                    'api_key' => 'pk_test_ru',
+                    'api_secret' => 'sk_test_ru',
+                    'project_id' => 'prj_ru',
+                    'webhook_secret' => 'whsec_ru',
+                ),
+            ),
+        ));
+        $ruConnected = Config::moduleConfig();
+        assertSameValue(
+            'Подключено — ключи зашифрованы в этой установке WHMCS',
+            $ruConnected['generatedConfig']['Description'],
+            'Russian admin must see localized connected status in Description.'
+        );
+        assertSameValue(
+            $ruConnected['generatedConfig']['Description'],
+            $ruConnected['generatedConfig']['Value'],
+            'Russian admin connected Value must match Description.'
+        );
+
+        // Fallback to WHMCS store default language when admin language is absent.
+        unset($_SESSION['adminid']);
+        \WHMCS\User\Admin::reset();
+        Config::resetForTests();
+        FakeWhmcsCapsuleState::$tables['tblconfiguration'] = array(
+            array('setting' => 'Language', 'value' => 'russian'),
+        );
+        $ruStoreDefault = Config::moduleConfig();
+        assertSameValue('Режим', $ruStoreDefault['mode']['FriendlyName'], 'Store default Russian language must localize moduleConfig().');
+        assertSameValue('Подключение', $ruStoreDefault['generatedConfig']['FriendlyName'], 'Store default Russian language must localize Connection label.');
+    } finally {
+        if ($hadAdminId) {
+            $_SESSION['adminid'] = $previousAdminId;
+        } else {
+            unset($_SESSION['adminid']);
+        }
+        if ($hadSessionLanguage) {
+            $_SESSION['Language'] = $previousSessionLanguage;
+        } else {
+            unset($_SESSION['Language']);
+        }
+        Config::resetForTests();
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin')) {
+            \WHMCS\User\Admin::reset();
+        }
+    }
+}
+
+function test_whmcs_manifest_points_to_valid_png_logo()
+{
+    $manifestPath = PAYMOS_WHMCS_MODULE_DIR . 'whmcs.json';
+    assertTrueValue(is_file($manifestPath), 'whmcs.json must exist in the gateway module directory.');
+
+    $manifest = json_decode((string) file_get_contents($manifestPath), true);
+    assertTrueValue(is_array($manifest), 'whmcs.json must contain valid JSON.');
+    assertTrueValue(isset($manifest['logo']['filename']), 'whmcs.json must declare logo.filename.');
+    assertSameValue('logo.png', $manifest['logo']['filename'], 'whmcs.json must point to raster logo.png instead of SVG.');
+
+    $logoPath = PAYMOS_WHMCS_MODULE_DIR . $manifest['logo']['filename'];
+    assertTrueValue(is_file($logoPath), 'logo.png referenced by whmcs.json must exist.');
+
+    $bytes = file_get_contents($logoPath);
+    assertTrueValue(is_string($bytes) && strlen($bytes) >= 24, 'logo.png must be readable and contain a complete PNG header.');
+    assertSameValue("\x89PNG\r\n\x1a\n", substr($bytes, 0, 8), 'logo.png must start with the 8-byte PNG signature.');
+    assertSameValue('IHDR', substr($bytes, 12, 4), 'logo.png must start with an IHDR chunk.');
+
+    $dimensions = unpack('Nwidth/Nheight', substr($bytes, 16, 8));
+    assertTrueValue(is_array($dimensions), 'logo.png IHDR dimensions must unpack cleanly.');
+    assertSameValue(400, (int) $dimensions['width'], 'logo.png width must be 400px.');
+    assertSameValue(80, (int) $dimensions['height'], 'logo.png height must be 80px.');
+}
+
+function test_whmcs_connect_footer_targets_paymos_form_and_resolves_csrf_token()
+{
+    $output = array();
+    $status = 0;
+    exec(
+        escapeshellarg(PHP_BINARY) . ' ' . escapeshellarg(__DIR__ . '/fixtures/connect-footer.php') . ' 2>&1',
+        $output,
+        $status
+    );
+    $joined = implode(PHP_EOL, $output);
+
+    assertSameValue(0, $status, $joined);
+    assertContainsValue('OK connect-footer', $joined, 'Connect footer fixture must verify #configpaymosgatewayForm targeting and CSRF resolution.');
+}

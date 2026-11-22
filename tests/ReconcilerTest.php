@@ -234,3 +234,61 @@ function test_whmcs_adapter_get_invoice_tells_not_found_from_a_failure()
         assertTrueValue($threw, 'any other GetInvoice error must throw, never read as a deleted invoice (#' . $invoiceId . ').');
     }
 }
+
+function test_whmcs_reconciler_silently_skips_open_awaiting_client_without_snapshot_mismatch_log()
+{
+    foreach (array('awaiting_client', 'pending', 'created') as $openStatus) {
+        $store = whmcs_store_with_invoice();
+        $adapter = new FakeWhmcsAdapter();
+        $transport = new MockTransport(array(
+            new HttpResponse(200, json_encode(array(
+                'invoice_id' => 'inv_123',
+                'project_id' => 'prj_123',
+                'status' => $openStatus,
+                'is_test' => true,
+                'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
+            )), array()),
+        ));
+        $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+        $count = (new Reconciler($store, $adapter, static function () use ($client) {
+            return $client;
+        }))->run(whmcs_gateway_params(), 1709000000);
+
+        assertSameValue(0, $count, $openStatus . ': open invoice must return 0 reconciled payments.');
+        assertSameValue(0, count($adapter->payments), $openStatus . ': open invoice must not add WHMCS payment.');
+        assertSameValue(0, count($adapter->logs), $openStatus . ': open invoice must not log Snapshot mismatch in tblgatewaylog.');
+    }
+
+    // Real amount/currency mismatches must still log Snapshot mismatch.
+    $mismatchCases = array(
+        'amount' => array('amount' => '80.00', 'currency' => 'USD'),
+        'currency' => array('amount' => '100.00', 'currency' => 'EUR'),
+    );
+    foreach ($mismatchCases as $label => $orderOverrides) {
+        $store = whmcs_store_with_invoice();
+        $adapter = new FakeWhmcsAdapter();
+        $transport = new MockTransport(array(
+            new HttpResponse(200, json_encode(array(
+                'invoice_id' => 'inv_123',
+                'project_id' => 'prj_123',
+                'status' => 'awaiting_client',
+                'is_test' => true,
+                'order' => array(
+                    'external_id' => 'whmcs_42_0',
+                    'amount' => $orderOverrides['amount'],
+                    'currency' => $orderOverrides['currency'],
+                ),
+            )), array()),
+        ));
+        $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+        $count = (new Reconciler($store, $adapter, static function () use ($client) {
+            return $client;
+        }))->run(whmcs_gateway_params(), 1709000000);
+
+        assertSameValue(0, $count, $label . ' mismatch must skip reconciliation.');
+        assertSameValue(1, count($adapter->logs), $label . ' mismatch must still log Snapshot mismatch.');
+        assertSameValue('Snapshot mismatch', $adapter->logs[0]['status'], $label . ' mismatch log status must be Snapshot mismatch.');
+    }
+}

@@ -18,9 +18,28 @@ namespace {
         return $name === 'WHMCS.admin.default' && !empty($GLOBALS['refund_csrf']);
     }
 
-    function getGatewayVariables($name)
-    {
-        return $GLOBALS['refund_gateway_params'];
+    if (($GLOBALS['argv'][1] ?? '') !== 'gatewayfunctions') {
+        function getGatewayVariables($name)
+        {
+            return $GLOBALS['refund_gateway_params'];
+        }
+    } else {
+        $paymosTempRoot = rtrim(sys_get_temp_dir(), '/\\') . DIRECTORY_SEPARATOR . 'paymos-whmcs-gw-' . bin2hex(random_bytes(6));
+        $paymosTempIncludes = $paymosTempRoot . DIRECTORY_SEPARATOR . 'includes';
+        if (!mkdir($paymosTempIncludes, 0777, true) && !is_dir($paymosTempIncludes)) {
+            throw new \RuntimeException('Failed to create temporary ROOTDIR for gatewayfunctions test.');
+        }
+        $paymosGatewayFunctions = $paymosTempIncludes . DIRECTORY_SEPARATOR . 'gatewayfunctions.php';
+        file_put_contents(
+            $paymosGatewayFunctions,
+            "<?php\n\$GLOBALS['refund_gatewayfunctions_loaded'] = true;\nfunction getGatewayVariables(\$name) { return \$GLOBALS['refund_gateway_params']; }\n"
+        );
+        register_shutdown_function(static function () use ($paymosGatewayFunctions, $paymosTempIncludes, $paymosTempRoot) {
+            if (is_file($paymosGatewayFunctions)) { @unlink($paymosGatewayFunctions); }
+            if (is_dir($paymosTempIncludes)) { @rmdir($paymosTempIncludes); }
+            if (is_dir($paymosTempRoot)) { @rmdir($paymosTempRoot); }
+        });
+        define('ROOTDIR', $paymosTempRoot);
     }
 
     require_once dirname(__DIR__) . '/bootstrap.php';
@@ -279,6 +298,7 @@ namespace {
         $GLOBALS['refund_csrf'] = false;
         $html = $panel($vars);
         assertContainsValue('id="paymos-refunds"', $html, 'GET renders the protected panel without a CSRF POST.');
+        assertContainsValue('if(!token)return;', $html, 'panel token binder skips undefined token when full button is absent.');
         assertContainsValue('name:"paymos_refund_token"', $html, 'panel binds a token to native forms.');
         assertContainsValue('data-mode="overpayment"', $html, 'managed overpayment action is present.');
         whmcs_refund_throws(static function () {
@@ -292,6 +312,21 @@ namespace {
         assertSameValue('refund_admin_access_denied', $result['rawdata']['reason'], 'native entry checks refund permission.');
         assertSameValue(0, count($f->server->requests), 'denied admin requests perform no HTTP.');
         assertSameValue(0, count($f->db->intents), 'denied admin requests do not persist intents.');
+    } elseif ($scenario === 'gatewayfunctions') {
+        assertFalseValue(function_exists('getGatewayVariables'), 'getGatewayVariables must be absent before the refund hook runs.');
+        assertTrueValue(empty($GLOBALS['refund_gatewayfunctions_loaded']), 'gatewayfunctions.php must not be loaded eagerly.');
+        $result = paymosgateway_refund_action(array(
+            'invoiceid' => 42,
+            'paymos_refund_action' => 'overpayment',
+            'request_token' => PaymosWhmcs\RefundIntentStore::uuid(),
+        ));
+        assertTrueValue(function_exists('getGatewayVariables'), 'paymosgateway_refund_action must load gatewayfunctions.php.');
+        assertTrueValue(!empty($GLOBALS['refund_gatewayfunctions_loaded']), 'gatewayfunctions.php must be loaded from ROOTDIR/includes/.');
+        assertSameValue('created', $result['cash_state'], 'refund action must succeed instead of failing with refund_module_inactive.');
+        $panel = $GLOBALS['refund_hooks']['AdminInvoicesControlsOutput'][1];
+        $html = $panel(array('paymentmethod' => 'paymosgateway', 'invoiceid' => 42));
+        assertContainsValue('id="paymos-refunds"', $html, 'AdminInvoicesControlsOutput renders panel after loading gatewayfunctions.php.');
+        assertContainsValue('if(!token)return;', $html, 'token binder guards against missing full button token.');
     } else {
         throw new RuntimeException('Unknown wiring scenario.');
     }

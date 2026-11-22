@@ -234,6 +234,36 @@ namespace {
     } catch (RuntimeException $error) { assertSameValue('lost response', $error->getMessage(), 'fixture failure must propagate.'); }
     refund_guard_denied($operations['refunded invoice'], 'exception revokes grant');
 
+    refund_guard_reset();
+    $refundInput = refund_guard_transaction();
+    $refundInput['paymentmethod'] = $refundInput['gateway'];
+    unset($refundInput['gateway']);
+    $refundInput['original_transaction_id'] = 1;
+    RefundWriteGuard::withProjection('RefundInvoicePayment', $refundInput, static function () {
+        refund_guard_denied(static function () { (new Transaction(refund_guard_transaction(array('amountout' => '99'))))->save(); }, 'RefundInvoicePayment grant requires exact amount');
+        refund_guard_denied(static function () { Invoice::load(42)->set('credit', '100')->save(); }, 'RefundInvoicePayment grant cannot issue credit');
+        refund_guard_denied(static function () { Invoice::load(42)->set('paymentmethod', 'third')->save(); }, 'RefundInvoicePayment grant cannot change gateway');
+        refund_guard_denied(static function () { Invoice::load(42)->set('status', 'Cancelled')->save(); }, 'RefundInvoicePayment grant cannot cancel invoice');
+        (new Transaction(refund_guard_transaction()))->save();
+        (new Transaction(array(
+            'invoiceid' => 42,
+            'userid' => 77,
+            'gateway' => '',
+            'transid' => '',
+            'amountin' => '100.00',
+            'amountout' => '0.00',
+            'fees' => '0.00',
+            'type' => 'invoice_billing_adjustment_credit',
+            'billingnoteid' => 11,
+        )))->save();
+        Invoice::load(42)->set('status', 'Unpaid')->save();
+        Invoice::load(42)->set('status', 'Refunded')->save();
+        refund_guard_denied(static function () { (new Transaction(refund_guard_transaction()))->save(); }, 'RefundInvoicePayment grant is consumed once');
+    });
+    assertSameValue('Refunded', RefundGuardTables::$rows['tblinvoices'][42]['status'], 'RefundInvoicePayment grant allows transition to Refunded.');
+    assertSameValue(3, count(RefundGuardTables::$rows['tblaccounts']), 'RefundInvoicePayment grant allows outgoing refund plus Credit Note.');
+    refund_guard_denied($operations['outgoing transaction'], 'RefundInvoicePayment grant ends after the call');
+
     $f = refund_guard_reset();
     $client = new Paymos\Client(new Paymos\ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $f->server);
     $native = static function ($command, $input) use ($f) {

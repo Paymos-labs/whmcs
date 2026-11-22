@@ -31,14 +31,7 @@ function paymosgateway_connect_authorize($csrf = true)
 
 function paymosgateway_connect_language()
 {
-    $adminId = class_exists('\WHMCS\Session') ? \WHMCS\Session::get('adminid') : ($_SESSION['adminid'] ?? null);
-    if ($adminId && class_exists('\WHMCS\User\Admin')) {
-        $admin = \WHMCS\User\Admin::find($adminId);
-        if ($admin) {
-            return array('language' => $admin->language);
-        }
-    }
-    return array();
+    return \PaymosWhmcs\Translation::adminLanguageParams();
 }
 
 if (isset($_POST['paymos_connect_action'])) {
@@ -115,12 +108,28 @@ add_hook('AdminAreaFooterOutput', 1, static function ($vars) {
         'code' => \PaymosWhmcs\Translation::text('connect_code', $language),
         'failed' => \PaymosWhmcs\Translation::text('connect_failed', $language),
     );
-    $token = isset($vars['token']) ? (string) $vars['token'] : '';
-    return '<script>(function(){var labels=' . json_encode($labels, JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT) . ';var form=document.querySelector("form");if(!form||document.getElementById("paymos-connect-button"))return;'
+    $token = '';
+    if (is_array($vars)) {
+        if (isset($vars['csrfToken']) && is_scalar($vars['csrfToken']) && trim((string) $vars['csrfToken']) !== '') {
+            $token = trim((string) $vars['csrfToken']);
+        } elseif (isset($vars['token']) && is_scalar($vars['token']) && trim((string) $vars['token']) !== '') {
+            $token = trim((string) $vars['token']);
+        }
+    }
+    if ($token === '' && function_exists('generate_token')) {
+        $generatedToken = generate_token('plain');
+        if (is_scalar($generatedToken)) {
+            $token = trim((string) $generatedToken);
+        }
+    }
+    $jsonFlags = JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT;
+    return '<script>(function(){var labels=' . json_encode($labels, $jsonFlags)
+        . ',injectedToken=' . json_encode($token, $jsonFlags) . ';'
+        . 'var form=document.getElementById("configpaymosgatewayForm");if(!form||document.getElementById("paymos-connect-button"))return;'
         . 'var box=document.createElement("div");box.className="alert alert-info";box.innerHTML="<strong>Paymos</strong><br><button type=\\"button\\" class=\\"btn btn-primary\\" id=\\"paymos-connect-button\\"></button> <span id=\\"paymos-connect-status\\"></span>";form.prepend(box);'
         . 'var b=document.getElementById("paymos-connect-button"),s=document.getElementById("paymos-connect-status"),manual=false;'
         . 'b.textContent=labels.button;'
-        . 'function post(a,r){var o={paymos_connect_action:a,token:' . json_encode($token) . '};if(r)o.paymos_return_url=r;var d=new URLSearchParams(o);return fetch(location.href,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:d.toString()}).then(function(r2){return r2.json();});}'
+        . 'function post(a,r){var tokInput=form.querySelector(\'input[name="token"]\');var csrfToken=(tokInput&&tokInput.value)?tokInput.value:injectedToken;var o={paymos_connect_action:a,token:csrfToken};if(r)o.paymos_return_url=r;var d=new URLSearchParams(o);return fetch(location.href,{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:d.toString()}).then(function(r2){return r2.json();});}'
         . 'function say(t){if(!manual)s.textContent=t;}'
         /* The tab is opened synchronously here: browsers only honour window.open for a
            few seconds after the click, so opening it once the start request resolves is

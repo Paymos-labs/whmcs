@@ -96,16 +96,35 @@ final class RefundAdapter implements NativeRefundProjectorInterface
 
     public function nativeRefund(array $params): array
     {
+        $lang = Translation::adminLanguageParams();
         try {
             $input = array('invoiceid' => $params['invoiceid'] ?? '', 'mode' => RefundStates::FULL,
                 'request_token' => $params['request_token'] ?? ($_POST['paymos_refund_token'] ?? ''),
                 'amount' => $params['amount'] ?? '', 'currency' => $params['currency'] ?? '', 'transid' => $params['transid'] ?? '');
             $intent = $this->submit($input);
+            if (in_array($intent->cashState(), array(RefundStates::FAILED, RefundStates::CANCELLED, RefundStates::REVIEW), true)) {
+                return array('status' => 'error', 'rawdata' => array(
+                    'message' => Translation::text('refund_native_failed', $lang),
+                    'reason' => $intent->toArray()['review_reason'],
+                    'operation_id' => $intent->operationId(),
+                    'cash_state' => $intent->cashState(),
+                    'projection_state' => $intent->projectionState(),
+                ));
+            }
             // WHMCS would book another amountout after a gateway success.
-            return array('status' => 'error', 'rawdata' => array('message' => 'WHMCS has no status for a refund in progress, so it reports this one as failed. Track it in the Paymos refunds panel on the invoice; the module records the refund in WHMCS once it completes.', 'operation_id' => $intent->operationId(),
-                'cash_state' => $intent->cashState(), 'projection_state' => $intent->projectionState()));
+            return array('status' => 'error', 'rawdata' => array(
+                'message' => Translation::text('refund_native_in_progress', $lang),
+                'operation_id' => $intent->operationId(),
+                'cash_state' => $intent->cashState(),
+                'projection_state' => $intent->projectionState(),
+            ));
         } catch (\Throwable $error) {
-            return array('status' => 'error', 'rawdata' => array('message' => 'Refund request failed; see reason below. If it is refund_reconnect_required, refunds through Paymos are not available on this connection: reconnect the module with Connect Paymos on the Payment Gateways page.', 'reason' => $error->getMessage()));
+            $reason = $error->getMessage();
+            $message = Translation::text('refund_failed', $lang);
+            if ($reason === 'refund_reconnect_required') {
+                $message .= ' ' . Translation::text('refund_reconnect_hint', $lang);
+            }
+            return array('status' => 'error', 'rawdata' => array('message' => $message, 'reason' => $reason));
         }
     }
 
@@ -208,18 +227,36 @@ final class RefundAdapter implements NativeRefundProjectorInterface
         }
         $row = $rows[0];
         $draft = $intent->fullDraft();
+        $accountCount = count($snapshot['accounts']);
         if ((string) $row['invoiceid'] !== $intent->paymentKey() || (string) $row['userid'] !== $draft['client_id']
             || $row['gateway'] !== 'paymosgateway' || !AmountGuard::amountsEqual((string) $row['amountin'], '0')
             || !AmountGuard::amountsEqual((string) $row['amountout'], $draft['amount_decimal'])
             || $snapshot['currency'] !== $draft['currency'] || (string) $snapshot['invoice']['userid'] !== $draft['client_id']
             || !AmountGuard::amountsEqual((string) $snapshot['invoice']['total'], $draft['amount_decimal'])
             || !AmountGuard::amountsEqual((string) $snapshot['invoice']['credit'], '0')
-            || count($snapshot['accounts']) !== 2 || !in_array($snapshot['invoice']['status'], array('Paid', 'Unpaid', 'Refunded'), true)
+            || ($accountCount !== 2 && $accountCount !== 3)
+            || !in_array($snapshot['invoice']['status'], array('Paid', 'Unpaid', 'Refunded'), true)
             || count(array_filter($snapshot['accounts'], static function ($account) use ($row) {
                 return (string) $account['id'] === (string) $row['id'] && $account === $row;
             })) !== 1
             || !$this->hasOriginalTransaction($snapshot, $draft)) {
             return $this->ambiguous($intent, 'refund_native_marker_conflict');
+        }
+        if ($accountCount === 3) {
+            $extra = array();
+            foreach ($snapshot['accounts'] as $account) {
+                $accountId = (string) ($account['id'] ?? '');
+                if ($accountId === (string) $row['id'] || $accountId === $draft['original_transaction_id']) {
+                    continue;
+                }
+                $extra[] = $account;
+            }
+            if (count($extra) !== 1 || !$this->isWhmcsCreditNoteAdjustment($extra[0], $draft, $intent->paymentKey())) {
+                return $this->ambiguous($intent, 'refund_native_marker_conflict');
+            }
+            if (($snapshot['invoice']['status'] ?? '') !== 'Refunded') {
+                return $this->ambiguous($intent, 'refund_native_status_not_refunded');
+            }
         }
         return new NativeProjectionResult(NativeProjectionResult::EXACT_MATCH, RefundStates::FULL,
             (string) $row['id'], $draft['amount_minor'], $draft['currency']);
@@ -240,14 +277,36 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                 $refund->principalDecimal(), $refund->currency() . '/' . $refund->network());
         }
         $draft = $intent->fullDraft();
-        $this->store->outsideTransaction(function () use ($intent, $draft) {
+        $useNativeRefund = $this->canUseNativeRefundInvoicePayment();
+        $expectedRefundFees = $useNativeRefund ? $this->expectedRefundFees($intent, $draft) : '0';
+        $this->store->outsideTransaction(function () use ($intent, $draft, $useNativeRefund, $expectedRefundFees) {
+            if ($useNativeRefund) {
+                $this->native('RefundInvoicePayment', array(
+                    'invoiceid' => (int) $intent->paymentKey(),
+                    'userid' => (int) $draft['client_id'],
+                    'paymentmethod' => 'paymosgateway',
+                    'transid' => 'paymos_refund_' . $intent->withdrawalId(),
+                    'original_transaction_id' => (int) $draft['original_transaction_id'],
+                    'amountin' => '0',
+                    'amountout' => $draft['amount_decimal'],
+                    'fees' => $expectedRefundFees,
+                ));
+                return;
+            }
             $this->native('AddTransaction', array('invoiceid' => (int) $intent->paymentKey(), 'userid' => (int) $draft['client_id'],
                 'paymentmethod' => 'paymosgateway', 'transid' => 'paymos_refund_' . $intent->withdrawalId(),
                 'amountout' => $draft['amount_decimal'], 'amountin' => '0', 'fees' => '0', 'credit' => false,
                 'allowduplicatetransid' => false, 'description' => 'Full refund through Paymos'));
         });
         // A success response alone cannot prove a native row was committed.
-        return $this->inspect($intent->operationId());
+        $result = $this->inspect($intent->operationId());
+        if ($useNativeRefund && $result->kind() === NativeProjectionResult::EXACT_MATCH) {
+            $snapshot = $this->native('snapshot', array('invoiceid' => (int) $intent->paymentKey()));
+            if (($snapshot['invoice']['status'] ?? '') !== 'Refunded') {
+                return $this->ambiguous($intent, 'refund_native_status_not_refunded');
+            }
+        }
+        return $result;
     }
 
     public function reconcile(string $operationId): string
@@ -274,10 +333,15 @@ final class RefundAdapter implements NativeRefundProjectorInterface
         }
         $snapshot = $this->native('snapshot', array('invoiceid' => (int) $intent->paymentKey()));
         if ($snapshot['invoice']['status'] !== 'Refunded') {
-            $this->store->outsideTransaction(function () use ($intent) {
-                $response = $this->native('UpdateInvoice', array('invoiceid' => (int) $intent->paymentKey(), 'status' => 'Refunded'));
-                if (($response['result'] ?? '') !== 'success') { throw new \RuntimeException('refund_native_status_unknown'); }
-            });
+            try {
+                $this->store->outsideTransaction(function () use ($intent) {
+                    $response = $this->native('UpdateInvoice', array('invoiceid' => (int) $intent->paymentKey(), 'status' => 'Refunded'));
+                    if (($response['result'] ?? '') !== 'success') { throw new \RuntimeException('refund_native_status_unknown'); }
+                });
+            } catch (\Throwable $error) {
+                $this->store->recordState($intent->operationId(), RefundStates::REVIEW, RefundStates::NATIVE_REVIEW, 'native_projection_unknown');
+                throw new \RuntimeException('refund_native_status_unknown', 0, $error);
+            }
         }
         // Customer confirmation is disabled until its native template/copy is supplied.
         if ($this->store->claimEffect($intent->operationId(), 'confirmation', 1)->kind() === 'claimed') {
@@ -336,23 +400,73 @@ final class RefundAdapter implements NativeRefundProjectorInterface
     {
         call_user_func($this->authorize);
         return $this->store->withPaymentLock((string) $invoiceId, function () use ($invoiceId) {
-            $html = '<div id="paymos-refunds"><strong>Paymos refunds</strong>';
+            $lang = Translation::adminLanguageParams();
+            $title = htmlspecialchars(Translation::text('refund_panel_title', $lang), ENT_QUOTES, 'UTF-8');
+            $html = '<div id="paymos-refunds"><strong>' . $title . '</strong>';
             $tokens = array('full' => RefundIntentStore::uuid(), 'overpayment' => RefundIntentStore::uuid());
+            $hasCompletedFull = false;
+            $hasCompletedOver = false;
+            $labels = array(
+                htmlspecialchars(Translation::text('refund_label_operation', $lang), ENT_QUOTES, 'UTF-8'),
+                htmlspecialchars(Translation::text('refund_label_type', $lang), ENT_QUOTES, 'UTF-8'),
+                htmlspecialchars(Translation::text('refund_label_cash_status', $lang), ENT_QUOTES, 'UTF-8'),
+                htmlspecialchars(Translation::text('refund_label_whmcs_record', $lang), ENT_QUOTES, 'UTF-8'),
+                htmlspecialchars(Translation::text('refund_label_review_reason', $lang), ENT_QUOTES, 'UTF-8'),
+                htmlspecialchars(Translation::text('refund_label_amount', $lang), ENT_QUOTES, 'UTF-8'),
+            );
             foreach ($this->store->forPayment((string) $invoiceId) as $intent) {
-                if ($this->store->blocksNewIntent($intent)) { $tokens[$intent->mode()] = $intent->toArray()['request_token']; }
+                if ($this->store->blocksNewIntent($intent)) {
+                    $tokens[$intent->mode()] = $intent->toArray()['request_token'];
+                }
+                if ($intent->mode() === RefundStates::FULL && $intent->cashState() === RefundStates::COMPLETED) {
+                    $hasCompletedFull = true;
+                }
+                if ($intent->mode() === RefundStates::OVERPAYMENT && $intent->cashState() === RefundStates::COMPLETED) {
+                    $hasCompletedOver = true;
+                }
                 $observation = $intent->observation();
                 $values = array($intent->operationId(), $intent->mode(), $intent->cashState(), $intent->projectionState(),
                     $intent->toArray()['review_reason'], $observation === null ? '' : $observation->principalDecimal() . ' ' . $observation->currency() . '/' . $observation->network());
-                $labels = array('Operation', 'Type', 'Cash status', 'WHMCS record', 'Review reason', 'Amount');
-                foreach ($values as $i => $value) { $html .= '<p>' . $labels[$i] . ': <code>' . htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8') . '</code></p>'; }
+                foreach ($values as $i => $value) {
+                    $html .= '<p>' . $labels[$i] . ': <code>' . htmlspecialchars((string) $value, ENT_QUOTES, 'UTF-8') . '</code></p>';
+                }
             }
-            foreach ($tokens as $mode => $token) {
-                $label = $mode === 'full' ? 'Refund in full' : 'Refund overpayment';
-                $html .= '<button type="button" class="btn btn-default paymos-refund" data-mode="' . $mode . '" data-token="' . $token . '">' . $label . '</button>';
+            $snapshot = null;
+            try {
+                $snapshot = $this->native('snapshot', array('invoiceid' => $invoiceId));
+            } catch (\Throwable $error) {
+                $snapshot = null;
             }
-            return $html . '</div><script>jQuery(function($){$(".paymos-refund").on("click",function(){var b=$(this);b.prop("disabled",true);'
+            $visibleModes = array();
+            if (is_array($snapshot) && (($snapshot['invoice']['status'] ?? '') === 'Paid') && !$hasCompletedFull) {
+                $visibleModes[] = RefundStates::FULL;
+                if (!$hasCompletedOver && (($snapshot['mapping']['status'] ?? '') === 'paid_over')) {
+                    $visibleModes[] = RefundStates::OVERPAYMENT;
+                }
+            }
+            foreach ($visibleModes as $mode) {
+                $labelKey = $mode === RefundStates::FULL ? 'refund_button_full' : 'refund_button_overpayment';
+                $label = htmlspecialchars(Translation::text($labelKey, $lang), ENT_QUOTES, 'UTF-8');
+                $html .= '<button type="button" class="btn btn-default paymos-refund" data-mode="' . $mode . '" data-token="' . $tokens[$mode] . '">' . $label . '</button>';
+            }
+            $fallbackError = json_encode(
+                Translation::text('refund_failed', $lang),
+                JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_UNESCAPED_UNICODE
+            );
+            if ($fallbackError === false) {
+                $fallbackError = '"Refund request failed."';
+            }
+            return $html . '</div><script>jQuery(function($){var fallback=' . $fallbackError . ';'
+                . '$(".paymos-refund").on("click",function(){var b=$(this);b.prop("disabled",true);'
+                . '$("#paymos-refunds .paymos-refund-error").remove();'
                 . '$.post(location.href,{paymos_refund_action:b.data("mode"),request_token:b.data("token"),invoiceid:' . $invoiceId . ',token:$("input[name=token]").first().val()}'
-                . ').done(function(){location.reload();}).fail(function(){b.prop("disabled",false);});});});</script>';
+                . ').done(function(){location.reload();}).fail(function(xhr){'
+                . 'var data=xhr&&xhr.responseJSON?xhr.responseJSON:null;'
+                . 'if(!data&&xhr&&xhr.responseText){try{data=JSON.parse(xhr.responseText);}catch(e){data=null;}}'
+                . 'var msg=data&&data.message?String(data.message):fallback;'
+                . 'if(data&&data.reason){msg+=" ("+String(data.reason)+")";}'
+                . '$(\'<div class="alert alert-danger paymos-refund-error"></div>\').text(msg).appendTo("#paymos-refunds");'
+                . 'b.prop("disabled",false);});});});</script>';
         });
     }
 
@@ -453,10 +567,61 @@ final class RefundAdapter implements NativeRefundProjectorInterface
         return new Client(Config::fromParams(array_merge($this->params, array('mode' => $environment)))->clientConfigForEnvironment($environment));
     }
 
+    private function isWhmcsCreditNoteAdjustment(array $account, array $draft, string $paymentKey): bool
+    {
+        return (string) ($account['type'] ?? '') === 'invoice_billing_adjustment_credit'
+            && (int) ($account['billingnoteid'] ?? 0) > 0
+            && (string) ($account['gateway'] ?? '') === ''
+            && (string) ($account['transid'] ?? '') === ''
+            && (string) ($account['invoiceid'] ?? '') === $paymentKey
+            && (string) ($account['userid'] ?? '') === $draft['client_id']
+            && AmountGuard::amountsEqual((string) ($account['amountin'] ?? '0'), $draft['amount_decimal'])
+            && AmountGuard::amountsEqual((string) ($account['amountout'] ?? '0'), '0')
+            && AmountGuard::amountsEqual((string) ($account['fees'] ?? '0'), '0');
+    }
+
+    private function expectedRefundFees(RefundIntent $intent, array $draft): string
+    {
+        $snapshot = $this->native('snapshot', array('invoiceid' => (int) $intent->paymentKey()));
+        foreach ($snapshot['accounts'] ?? array() as $account) {
+            if ((string) ($account['id'] ?? '') !== $draft['original_transaction_id']) {
+                continue;
+            }
+            $normalized = AmountGuard::normalizeDecimal((string) ($account['fees'] ?? '0'));
+            if ($normalized === null || $normalized === '0') {
+                return '0';
+            }
+            return $normalized[0] === '-' ? substr($normalized, 1) : '-' . $normalized;
+        }
+        return '0';
+    }
+
+    private function canUseNativeRefundInvoicePayment(): bool
+    {
+        if ($this->native !== null) {
+            return false;
+        }
+        if (!function_exists('refundInvoicePayment') || !function_exists('getCCVariables')) {
+            $root = defined('ROOTDIR') ? rtrim((string) ROOTDIR, '/\\') : dirname(__DIR__, 4);
+            foreach (array(
+                '/includes/gatewayfunctions.php',
+                '/includes/clientfunctions.php',
+                '/includes/ccfunctions.php',
+                '/includes/invoicefunctions.php',
+            ) as $relative) {
+                $path = $root . $relative;
+                if (is_file($path)) {
+                    require_once $path;
+                }
+            }
+        }
+        return function_exists('refundInvoicePayment');
+    }
+
     private function native(string $command, array $input): array
     {
         $this->store->assertOwned();
-        if (in_array($command, array('AddTransaction', 'UpdateInvoice'), true)) {
+        if (in_array($command, array('AddTransaction', 'UpdateInvoice', 'RefundInvoicePayment'), true)) {
             return RefundWriteGuard::withProjection($command, $input, function () use ($command, $input) {
                 return $this->nativeCall($command, $input);
             });
@@ -477,6 +642,24 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                 'accounts' => $this->store->rows('SELECT * FROM tblaccounts WHERE invoiceid = ? ORDER BY id', array($id)));
         }
         if ($command === 'marker') { return $this->store->rows('SELECT * FROM tblaccounts WHERE transid = ?', array($input['transid'])); }
+        if ($command === 'RefundInvoicePayment') {
+            if (!function_exists('refundInvoicePayment')) {
+                throw new \RuntimeException('refund_native_api_unavailable');
+            }
+            $result = refundInvoicePayment(
+                (int) $input['original_transaction_id'],
+                (string) $input['amountout'],
+                false,
+                false,
+                false,
+                (string) $input['transid'],
+                false
+            );
+            if (!in_array($result, array('manual', 'success'), true)) {
+                throw new \RuntimeException('refund_native_projection_failed');
+            }
+            return array('result' => 'success', 'status' => $result);
+        }
         if (!function_exists('localAPI')) { throw new \RuntimeException('refund_native_api_unavailable'); }
         $response = localAPI($command, $input);
         if (!is_array($response)) { throw new \RuntimeException('refund_native_response_unknown'); }

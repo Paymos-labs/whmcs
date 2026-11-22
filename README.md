@@ -26,9 +26,9 @@ Turkish and Simplified Chinese, and follows the language the WHMCS admin is usin
 
 1. Download the latest package from [GitHub Releases](https://github.com/paymos-labs/whmcs/releases/latest).
 2. Extract the archive over your WHMCS root — it lays down `modules/gateways/` and `includes/hooks/`.
-3. Open **Configuration → System Settings → Payment Gateways**, and activate Paymos from **All Payment Gateways**.
+3. Open **Configuration → Apps & Integrations → Payments → Paymos → Activate** (WHMCS 8.13–9.1), which activates the module and opens its settings panel under **Configuration → System Settings → Payment Gateways**.
 4. Open the project that should receive this installation's invoices in the Paymos dashboard; that current project is used automatically.
-5. Click **Connect Paymos** on the payment gateways page.
+5. Click **Connect Paymos** inside the Paymos panel on **Configuration → System Settings → Payment Gateways**.
 6. Approve it in the Paymos tab — the page shows the System URL it is binding and the project it will bill into, and there is no second project selector anywhere in the flow.
 
 Every merchant downloads the same archive, and it carries no API key, API secret,
@@ -52,6 +52,13 @@ https://your-store.example/modules/gateways/callback/paymosgateway.php
 After that the module has three settings, and none of them is a credential: **Mode**
 (Sandbox or Live), **Button Text**, and a read-only **Connection** line telling you
 whether this installation is connected.
+
+Leave WHMCS's **Convert To For Processing** option set to **None**. Paymos settles
+every invoice in the invoice's own WHMCS currency; if **Convert To For Processing**
+converts an invoice into another currency, the module fails closed before creating
+a Paymos invoice, logs `Currency mismatch: disable Convert To For Processing` to
+**Billing → Gateway Log**, and tells the client that this payment method cannot be
+used.
 
 ## Secret storage
 
@@ -147,12 +154,21 @@ Administrators with the **Refund Invoice Payments** permission have two entry po
 on a paid Paymos invoice in WHMCS:
 
 - the **Paymos refunds** panel rendered directly on the admin invoice view
-  (`AdminInvoicesControlsOutput`), which offers both `full` and `overpayment`
-  actions and displays the operation state;
+  (`AdminInvoicesControlsOutput`), which offers the available `full` and (for
+  `paid_over` invoices) `overpayment` actions, hides modes that do not apply or
+  have already completed, and displays the operation state and any request errors;
 - the native WHMCS invoice **Refund** tab (`paymosgateway_refund`), which submits a
   `full` refund intent. Because WHMCS has no native "refund in progress" state,
   `paymosgateway_refund` records the request without booking a premature accounting
   debit and updates the WHMCS invoice once the Paymos refund reaches `completed`.
+
+When a `full` refund reaches `completed` (via webhook or cron reconciliation), the
+module records it through WHMCS's native `refundInvoicePayment` (without sending a
+second request to the gateway). On WHMCS 9.1 with **Invoice Immutability** enabled,
+WHMCS atomically creates the outbound refund transaction and matching Credit Note
+(`invoice_billing_adjustment_credit`) and transitions the invoice to **Refunded**
+with a zero balance; on WHMCS 8.13 (or without immutability) it books the standard
+refund transaction and marks the invoice **Refunded**.
 
 Background reconciliation runs on WHMCS `AfterCronJob`
 (`includes/hooks/paymosgateway_reconcile.php`) and syncs in-flight refund intents
@@ -174,6 +190,13 @@ still payable, or could not be read. In the second case no new invoice is issued
 and the client is asked to contact you, so check the old invoice in the Paymos
 dashboard first. Reconcile either case by hand. `Snapshot mismatch` means the stored record and the
 live invoice disagree, and nothing will be applied until they do.
+
+**The client sees "This payment method cannot be used for this invoice."** Check
+**Billing → Gateway Log**. If it shows `Currency mismatch: disable Convert To For
+Processing`, open **Configuration → System Settings → Payment Gateways** and set
+**Convert To For Processing** on Paymos to **None** — Paymos bills in the invoice's
+native currency and fails closed before creating a Paymos invoice when WHMCS
+converts the amount into a different processing currency.
 
 **Nothing at all in the Gateway Log.** Then the callback never arrived. Request the
 callback URL above from outside your network: it must be reachable without HTTP

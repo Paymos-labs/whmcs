@@ -2,7 +2,7 @@
   "schema": "1.0",
   "type": "whmcs-gateways",
   "name": "paymosgateway",
-  "version": "1.7.4",
+  "version": "1.7.5",
   "license": "MIT",
   "category": "payments",
   "description": {
@@ -17,7 +17,7 @@
     ]
   },
   "logo": {
-    "filename": "logo.svg"
+    "filename": "logo.png"
   },
   "support": {
     "homepage": "https://paymos.io",

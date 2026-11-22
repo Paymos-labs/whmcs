@@ -32,3 +32,8 @@ function test_whmcs_refund_wiring_admin_permissions_csrf_and_durable_tokens()
 {
     whmcs_refund_wiring_scenario('admin');
 }
+
+function test_whmcs_refund_wiring_loads_gatewayfunctions_when_absent()
+{
+    whmcs_refund_wiring_scenario('gatewayfunctions');
+}

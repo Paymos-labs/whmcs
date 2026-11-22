@@ -193,7 +193,13 @@ final class WhmcsRefundServer implements TransportInterface
             }
             assertTrueValue($committed, 'mode-bound uncertainty is committed before HTTP.');
             if ($this->refuse) {
-                return new HttpResponse(409, json_encode(array('code' => 'refund_not_eligible', 'detail' => 'Refused')), array());
+                return new HttpResponse(409, json_encode(array(
+                    'type' => 'https://api.paymos.io/errors/conflict',
+                    'title' => 'Conflict',
+                    'status' => 409,
+                    'detail' => 'Refused',
+                    'code' => 'refund_not_eligible',
+                )), array('content-type' => 'application/problem+json'));
             }
             $key = $input['external_order_id'];
             if (!isset($this->refunds[$key])) {
@@ -488,7 +494,16 @@ function test_whmcs_refund_native_status_failure_retries_only_status_after_exact
     $f = whmcs_refund_fixture(); $intent = $f->adapter->submit(whmcs_refund_input());
     $f->native->statusFailure = true;
     whmcs_refund_throws(static function () use ($f, $intent) { whmcs_refund_complete($f, $intent); }, 'native_status_unknown');
+    $afterFailure = $f->store->getIntent($intent->operationId());
+    assertTrueValue($afterFailure->projectionState() !== RefundStates::PROJECTION_APPLIED, 'failed UpdateInvoice must not leave projection_state applied while invoice is Paid.');
+    assertSameValue(RefundStates::NATIVE_REVIEW, $afterFailure->projectionState(), 'failed UpdateInvoice moves intent to retryable native_review.');
+    assertSameValue(RefundStates::REVIEW, $afterFailure->cashState(), 'failed UpdateInvoice moves cash state to review.');
+    assertSameValue('native_projection_unknown', $afterFailure->toArray()['review_reason'], 'failed UpdateInvoice records retryable review reason.');
+    assertSameValue('Paid', $f->native->snapshot['invoice']['status'], 'invoice remains Paid when UpdateInvoice fails.');
     $f->adapter->reconcile($intent->operationId());
+    $afterRecovery = $f->store->getIntent($intent->operationId());
+    assertSameValue(RefundStates::COMPLETED, $afterRecovery->cashState(), 'status retry restores completed cash state.');
+    assertSameValue(RefundStates::PROJECTION_APPLIED, $afterRecovery->projectionState(), 'status retry marks projection applied once Refunded.');
     assertSameValue(2, count($f->native->snapshot['accounts']), 'status retry cannot repeat financial entry.');
     assertSameValue('Refunded', $f->native->snapshot['invoice']['status'], 'status recovers from exact outgoing row.');
 }
@@ -661,6 +676,277 @@ function test_whmcs_refund_preflight_transient_failures_return_retry_and_determi
         $after = $f->adapter->submit($replayInput);
         assertSameValue(RefundStates::REVIEW, $after->cashState(), 'deterministic API refusal moves saved intent to review.');
         assertSameValue($expectedCode, $after->toArray()['review_reason'], 'review preserves API errorCode.');
+    }
+}
+
+function test_whmcs_refund_inspect_accepts_whmcs91_credit_note_and_rejects_tampered_third_row()
+{
+    $f = whmcs_refund_fixture();
+    $intent = $f->adapter->submit(whmcs_refund_input());
+    whmcs_refund_complete($f, $intent);
+
+    $creditNote = array(
+        'id' => 3,
+        'userid' => 77,
+        'invoiceid' => 42,
+        'gateway' => '',
+        'transid' => '',
+        'amountin' => '100.00',
+        'amountout' => '0.00',
+        'fees' => '0.00',
+        'type' => 'invoice_billing_adjustment_credit',
+        'billingnoteid' => 15,
+    );
+    $f->native->snapshot['accounts'][] = $creditNote;
+    $f->native->snapshot['invoice']['status'] = 'Refunded';
+
+    $inspect = static function () use ($f, $intent) {
+        return $f->store->withPaymentLock('42', static function () use ($f, $intent) {
+            return $f->adapter->inspect($intent->operationId());
+        });
+    };
+
+    $exact = $inspect();
+    assertSameValue(NativeProjectionResult::EXACT_MATCH, $exact->kind(), 'valid WHMCS 9.1 3-row Credit Note projection must match.');
+    assertSameValue('2', $exact->nativeId(), 'exact match retains the outgoing refund transaction id.');
+    assertSameValue('10000', $exact->nativeAmountMinor(), 'exact match retains minor amount.');
+    assertSameValue('USD', $exact->nativeCurrency(), 'exact match retains invoice currency.');
+
+    // Stubs without a fees key on the Credit Note row must also pass safely.
+    $withoutFees = $creditNote;
+    unset($withoutFees['fees']);
+    $f->native->snapshot['accounts'][2] = $withoutFees;
+    assertSameValue(NativeProjectionResult::EXACT_MATCH, $inspect()->kind(), '3-row Credit Note without fees key defaults fees to 0.');
+
+    // 3-row WHMCS 9.1 ledger must reject non-Refunded invoice status.
+    $f->native->snapshot['accounts'][2] = $creditNote;
+    foreach (array('Paid', 'Unpaid') as $badStatus) {
+        $f->native->snapshot['invoice']['status'] = $badStatus;
+        $notRefunded = $inspect();
+        assertSameValue(NativeProjectionResult::AMBIGUOUS, $notRefunded->kind(), '3-row ledger with status ' . $badStatus . ' must be ambiguous.');
+        assertSameValue('refund_native_status_not_refunded', $notRefunded->reason(), '3-row ledger with status ' . $badStatus . ' must report status not refunded.');
+    }
+
+    // Tampered 3rd row must fail closed with refund_native_marker_conflict.
+    $f->native->snapshot['invoice']['status'] = 'Refunded';
+    $tampers = array(
+        'type' => array('type' => 'manual_credit'),
+        'billingnoteid' => array('billingnoteid' => 0),
+        'gateway' => array('gateway' => 'paymosgateway'),
+        'transid' => array('transid' => 'fake_tx'),
+        'invoiceid' => array('invoiceid' => 99),
+        'userid' => array('userid' => 88),
+        'amountin' => array('amountin' => '50.00'),
+        'amountout' => array('amountout' => '1.00'),
+        'fees' => array('fees' => '1.00'),
+    );
+    foreach ($tampers as $label => $override) {
+        $f->native->snapshot['accounts'][2] = array_replace($creditNote, $override);
+        $tampered = $inspect();
+        assertSameValue(NativeProjectionResult::AMBIGUOUS, $tampered->kind(), 'tampered Credit Note (' . $label . ') must be ambiguous.');
+        assertSameValue('refund_native_marker_conflict', $tampered->reason(), 'tampered Credit Note (' . $label . ') must report marker conflict.');
+    }
+
+    // Duplicate 4th Credit Note row must fail closed.
+    $f->native->snapshot['accounts'][2] = $creditNote;
+    $f->native->snapshot['accounts'][] = array_replace($creditNote, array('id' => 4));
+    $duplicate = $inspect();
+    assertSameValue(NativeProjectionResult::AMBIGUOUS, $duplicate->kind(), '4 account rows must be ambiguous.');
+    assertSameValue('refund_native_marker_conflict', $duplicate->reason(), '4 account rows must report marker conflict.');
+}
+
+function test_whmcs_refund_panel_hides_irrelevant_buttons_localizes_and_surfaces_errors()
+{
+    $hadLanguage = isset($_SESSION['Language']);
+    $previousLanguage = $hadLanguage ? $_SESSION['Language'] : null;
+    $hadAdminId = isset($_SESSION['adminid']);
+    $previousAdminId = $hadAdminId ? $_SESSION['adminid'] : null;
+
+    try {
+        unset($_SESSION['Language'], $_SESSION['adminid']);
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin') && method_exists('WHMCS\\User\\Admin', 'reset')) {
+            \WHMCS\User\Admin::reset();
+        }
+
+        // 1) Unpaid invoice shows no refund buttons.
+        $f = whmcs_refund_fixture();
+        $f->native->snapshot['invoice']['status'] = 'Unpaid';
+        $unpaidHtml = $f->adapter->panel(42);
+        assertContainsValue('id="paymos-refunds"', $unpaidHtml, 'panel container renders for Unpaid invoice.');
+        assertFalseValue(strpos($unpaidHtml, 'data-mode="full"') !== false, 'Unpaid invoice must hide full button.');
+        assertFalseValue(strpos($unpaidHtml, 'data-mode="overpayment"') !== false, 'Unpaid invoice must hide overpayment button.');
+
+        // 2) Paid + mapping=paid shows only full (no overpayment).
+        $f->native->snapshot['invoice']['status'] = 'Paid';
+        $f->native->snapshot['mapping']['status'] = 'paid';
+        $paidHtml = $f->adapter->panel(42);
+        assertContainsValue('data-mode="full"', $paidHtml, 'Paid invoice shows full button.');
+        assertFalseValue(strpos($paidHtml, 'data-mode="overpayment"') !== false, 'Exact paid invoice must hide overpayment button.');
+
+        // 3) Paid + mapping=paid_over shows both buttons and XSS-safe JS error handling.
+        $f->native->snapshot['mapping']['status'] = 'paid_over';
+        $paidOverHtml = $f->adapter->panel(42);
+        assertContainsValue('data-mode="full"', $paidOverHtml, 'paid_over shows full button.');
+        assertContainsValue('data-mode="overpayment"', $paidOverHtml, 'paid_over shows overpayment button.');
+        assertContainsValue('$("#paymos-refunds .paymos-refund-error").remove()', $paidOverHtml, 'panel JS clears previous errors before POST.');
+        assertContainsValue('xhr.responseJSON', $paidOverHtml, 'panel JS reads xhr.responseJSON on fail.');
+        assertContainsValue('JSON.parse(xhr.responseText)', $paidOverHtml, 'panel JS falls back to parsing xhr.responseText.');
+        assertContainsValue('paymos-refund-error', $paidOverHtml, 'panel JS renders visible error banner.');
+        assertContainsValue('.text(msg)', $paidOverHtml, 'panel JS inserts error message safely with .text().');
+        assertFalseValue(strpos($paidOverHtml, '.html(') !== false, 'panel JS must not render error messages via .html().');
+
+        // 4) After completed overpayment, overpayment button disappears while full remains and history renders.
+        $over = $f->adapter->submit(whmcs_refund_input('overpayment'));
+        whmcs_refund_complete($f, $over);
+        $afterOverHtml = $f->adapter->panel(42);
+        assertContainsValue($over->operationId(), $afterOverHtml, 'completed overpayment stays in panel history.');
+        assertContainsValue('data-mode="full"', $afterOverHtml, 'full button remains available after completed overpayment.');
+        assertFalseValue(strpos($afterOverHtml, 'data-mode="overpayment"') !== false, 'completed overpayment must hide overpayment button.');
+
+        // 5) Missing snapshot hides all buttons while still rendering existing intent history.
+        $missingAdapter = new RefundAdapter(array(), $f->store, null, static function ($command) {
+            if ($command === 'snapshot') {
+                throw new RuntimeException('refund_payment_mapping_missing');
+            }
+            return array();
+        }, static function () use ($f) { return (array) $f->config; }, static function () {});
+        $missingHtml = $missingAdapter->panel(42);
+        assertContainsValue($over->operationId(), $missingHtml, 'existing history renders even when snapshot is missing.');
+        assertFalseValue(strpos($missingHtml, 'data-mode="full"') !== false, 'missing snapshot hides full button.');
+        assertFalseValue(strpos($missingHtml, 'data-mode="overpayment"') !== false, 'missing snapshot hides overpayment button.');
+
+        // 6) Pending full intent reuses its durable request_token on the full button.
+        $fullInput = whmcs_refund_input('full');
+        $full = $f->adapter->submit($fullInput);
+        $pendingFullHtml = $f->adapter->panel(42);
+        assertContainsValue('data-mode="full" data-token="' . $fullInput['request_token'] . '"', $pendingFullHtml, 'pending full intent reuses its durable token.');
+
+        // 7) Completed full hides both buttons (both on Refunded and even if invoice status were still Paid).
+        whmcs_refund_complete($f, $full);
+        $refundedHtml = $f->adapter->panel(42);
+        assertContainsValue($full->operationId(), $refundedHtml, 'completed full stays in panel history.');
+        assertFalseValue(strpos($refundedHtml, 'data-mode="full"') !== false, 'Refunded invoice must hide full button.');
+        assertFalseValue(strpos($refundedHtml, 'data-mode="overpayment"') !== false, 'Refunded invoice must hide overpayment button.');
+
+        $f->native->snapshot['invoice']['status'] = 'Paid';
+        $completedFullPaidHtml = $f->adapter->panel(42);
+        assertFalseValue(strpos($completedFullPaidHtml, 'data-mode="full"') !== false, 'completed full intent hides full button even if status is still Paid.');
+        assertFalseValue(strpos($completedFullPaidHtml, 'data-mode="overpayment"') !== false, 'completed full intent hides overpayment button.');
+
+        // 8) Russian localization of panel title, all 6 field labels, buttons, and fallback error string.
+        $fRu = whmcs_refund_fixture();
+        $fRu->adapter->submit(whmcs_refund_input('overpayment'));
+        $_SESSION['Language'] = 'russian';
+        $ruHtml = $fRu->adapter->panel(42);
+        assertContainsValue('Возвраты Paymos', $ruHtml, 'Russian panel title must be localized.');
+        assertContainsValue('Операция: <code>', $ruHtml, 'Russian Operation label must be localized.');
+        assertContainsValue('Тип: <code>', $ruHtml, 'Russian Type label must be localized.');
+        assertContainsValue('Статус выплаты: <code>', $ruHtml, 'Russian Cash status label must be localized.');
+        assertContainsValue('Запись в WHMCS: <code>', $ruHtml, 'Russian WHMCS record label must be localized.');
+        assertContainsValue('Причина проверки: <code>', $ruHtml, 'Russian Review reason label must be localized.');
+        assertContainsValue('Сумма: <code>', $ruHtml, 'Russian Amount label must be localized.');
+        assertContainsValue('Полный возврат', $ruHtml, 'Russian full button must be localized.');
+        assertContainsValue('Вернуть переплату', $ruHtml, 'Russian overpayment button must be localized.');
+        assertContainsValue('Не удалось оформить возврат.', $ruHtml, 'Russian fallback error must be localized.');
+    } finally {
+        if ($hadLanguage) {
+            $_SESSION['Language'] = $previousLanguage;
+        } else {
+            unset($_SESSION['Language']);
+        }
+        if ($hadAdminId) {
+            $_SESSION['adminid'] = $previousAdminId;
+        } else {
+            unset($_SESSION['adminid']);
+        }
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin') && method_exists('WHMCS\\User\\Admin', 'reset')) {
+            \WHMCS\User\Admin::reset();
+        }
+    }
+}
+
+function test_whmcs_refund_native_entry_logs_failure_reason_when_cash_failed()
+{
+    $hadLanguage = isset($_SESSION['Language']);
+    $previousLanguage = $hadLanguage ? $_SESSION['Language'] : null;
+    $hadAdminId = isset($_SESSION['adminid']);
+    $previousAdminId = $hadAdminId ? $_SESSION['adminid'] : null;
+
+    try {
+        unset($_SESSION['Language'], $_SESSION['adminid']);
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin') && method_exists('WHMCS\\User\\Admin', 'reset')) {
+            \WHMCS\User\Admin::reset();
+        }
+
+        // 1) cash_state = failed
+        $f = whmcs_refund_fixture();
+        $f->server->refuse = true;
+        $failed = $f->adapter->nativeRefund(whmcs_refund_input() + array('amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
+        assertSameValue('error', $failed['status'], 'failed native refund returns error.');
+        assertSameValue(RefundStates::FAILED, $failed['rawdata']['cash_state'], 'cash_state is failed.');
+        assertSameValue('refund_not_eligible', $failed['rawdata']['reason'], 'failed native refund includes failure reason.');
+        assertContainsValue('Paymos refund failed.', $failed['rawdata']['message'], 'failed native refund logs failure message.');
+        assertFalseValue(strpos($failed['rawdata']['message'], 'in progress') !== false, 'failed native refund must not report refund in progress.');
+
+        // 2) cash_state = cancelled
+        $fCancelled = whmcs_refund_fixture();
+        $cancelledInput = whmcs_refund_input();
+        $intentCancelled = $fCancelled->adapter->submit($cancelledInput);
+        $fCancelled->server->refunds[$intentCancelled->externalOrderId()]['status'] = 'cancelled';
+        $cancelled = $fCancelled->adapter->nativeRefund($cancelledInput + array('amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
+        assertSameValue('error', $cancelled['status'], 'cancelled native refund returns error.');
+        assertSameValue(RefundStates::CANCELLED, $cancelled['rawdata']['cash_state'], 'cash_state is cancelled.');
+        assertContainsValue('Paymos refund failed.', $cancelled['rawdata']['message'], 'cancelled native refund logs failure message.');
+        assertTrueValue(array_key_exists('reason', $cancelled['rawdata']), 'cancelled native refund exposes reason key.');
+
+        // 3) cash_state = review
+        $fReview = whmcs_refund_fixture();
+        $reviewInput = whmcs_refund_input();
+        $intentReview = $fReview->adapter->submit($reviewInput);
+        $fReview->server->refunds[$intentReview->externalOrderId()]['amount'] = '121';
+        $review = $fReview->adapter->nativeRefund($reviewInput + array('amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
+        assertSameValue('error', $review['status'], 'review native refund returns error.');
+        assertSameValue(RefundStates::REVIEW, $review['rawdata']['cash_state'], 'cash_state is review.');
+        assertSameValue('refund_binding_conflict', $review['rawdata']['reason'], 'review native refund logs review_reason.');
+        assertContainsValue('Paymos refund failed.', $review['rawdata']['message'], 'review native refund logs failure message.');
+
+        // 4) Russian localization for both failed and in-progress responses
+        $_SESSION['Language'] = 'russian';
+        $fRuFailed = whmcs_refund_fixture();
+        $fRuFailed->server->refuse = true;
+        $ruFailed = $fRuFailed->adapter->nativeRefund(whmcs_refund_input() + array('amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
+        assertContainsValue('Возврат через Paymos не прошёл.', $ruFailed['rawdata']['message'], 'Russian admin receives localized failure message.');
+        assertSameValue('refund_not_eligible', $ruFailed['rawdata']['reason'], 'Russian failed response preserves machine reason.');
+
+        $fRuPending = whmcs_refund_fixture();
+        $ruPending = $fRuPending->adapter->nativeRefund(whmcs_refund_input() + array('amount' => '100.00', 'currency' => 'USD', 'transid' => 'paymos_inv_123_evt_paid'));
+        assertContainsValue('В WHMCS нет статуса', $ruPending['rawdata']['message'], 'Russian admin receives localized in-progress message.');
+    } finally {
+        if ($hadLanguage) {
+            $_SESSION['Language'] = $previousLanguage;
+        } else {
+            unset($_SESSION['Language']);
+        }
+        if ($hadAdminId) {
+            $_SESSION['adminid'] = $previousAdminId;
+        } else {
+            unset($_SESSION['adminid']);
+        }
+        if (class_exists('FakeWhmcsCapsuleState')) {
+            FakeWhmcsCapsuleState::reset();
+        }
+        if (class_exists('WHMCS\\User\\Admin') && method_exists('WHMCS\\User\\Admin', 'reset')) {
+            \WHMCS\User\Admin::reset();
+        }
     }
 }
 
