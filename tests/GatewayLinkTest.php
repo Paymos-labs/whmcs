@@ -931,3 +931,38 @@ function test_whmcs_gateway_link_retry_and_metadata_change_preserve_money_guards
     assertSameValue('whmcs_42_1', $newPayload['external_order_id'], 'bumped key must be used.');
     assertSameValue('Plan B', $newPayload['products'][0]['title'], 'new generation must carry current WHMCS items.');
 }
+
+function test_whmcs_gateway_link_formats_float_unit_amounts_locale_independently()
+{
+    // BUG-1467: PHP 7.4 LC_NUMERIC comma-decimal locales must never turn float unit_amount into "24,5".
+    $previousLocale = setlocale(LC_NUMERIC, '0');
+    setlocale(LC_NUMERIC, 'de_DE.UTF-8', 'de_DE', 'German_Germany.1252', 'fr_FR.UTF-8', 'French_France.1252');
+    try {
+        $store = new InMemoryInvoiceStore();
+        $adapter = new FakeWhmcsAdapter();
+        $adapter->invoices[42]['items'] = array(
+            'item' => array(
+                array('id' => '1', 'type' => 'Hosting', 'description' => 'VPS Plan', 'amount' => 24.5),
+                array('id' => '2', 'type' => 'Hosting', 'description' => 'Add-on', 'amount' => 19.99),
+                array('id' => '3', 'type' => 'Hosting', 'description' => 'Micro', 'amount' => 1e-9),
+                array('id' => '4', 'type' => 'Hosting', 'description' => 'Free', 'amount' => 0.0),
+            ),
+        );
+        $transport = new MockTransport(array(whmcs_created_response('inv_whmcs_locale')));
+        $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+        (new GatewayLink($store, static function () use ($client) {
+            return $client;
+        }, $adapter))->render(whmcs_gateway_params(array('amount' => '44.49')));
+
+        $payload = json_decode($transport->requests()[0]['body'], true);
+        assertSameValue('24.5', $payload['products'][0]['unit_amount'], 'Float 24.5 formats dot-decimal.');
+        assertSameValue('19.99', $payload['products'][1]['unit_amount'], 'Float 19.99 keeps exact cents.');
+        assertSameValue('0.000000001', $payload['products'][2]['unit_amount'], 'Scientific float formats dot-decimal.');
+        assertSameValue('0', $payload['products'][3]['unit_amount'], 'Zero float formats cleanly.');
+    } finally {
+        if (is_string($previousLocale)) {
+            setlocale(LC_NUMERIC, $previousLocale);
+        }
+    }
+}

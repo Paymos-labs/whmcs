@@ -8,6 +8,11 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.7.4] - 2026-11-22
+
+- fix(plugins,sdk,ci): fix PrestaShop/Shopware6/CMS locale & scalar bugs, Python webhook digits, atomic mirror pushes, token redaction, and release CI reliability (BUG-1434..1437, BUG-1461..1467, BUG-1478..1481)
+- chore: rebuild canonical CMS package
+
 ## [1.7.3] - 2026-11-21
 
 - chore: rebuild canonical CMS package

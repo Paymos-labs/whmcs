@@ -384,12 +384,18 @@ final class GatewayLink
             if (!is_finite($raw)) {
                 return null;
             }
-            if ($raw < 0) {
+            if ($raw < 0.0) {
                 return '-1';
             }
-            $formatted = (string) $raw;
-            if (stripos($formatted, 'e') !== false) {
+            if ($raw == 0.0) {
+                return '0';
+            }
+            $formatted = json_encode($raw);
+            if (!is_string($formatted) || $formatted === '' || strpos($formatted, ',') !== false || stripos($formatted, 'e') !== false) {
                 $formatted = rtrim(rtrim(sprintf('%.18F', $raw), '0'), '.');
+            }
+            if ($formatted === '' || $formatted === '0') {
+                return null;
             }
             return $formatted;
         }
