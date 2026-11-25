@@ -30,10 +30,9 @@ final class Config
     public static function moduleConfig()
     {
         $lang = Translation::adminLanguageParams();
-        $statusText = Translation::text(
-            self::hasGeneratedConfig() ? 'config_connection_connected' : 'config_connection_disconnected',
-            $lang
-        );
+        $statusText = self::hasGeneratedConfig()
+            ? Translation::text('config_connection_connected', $lang)
+            : Translation::text('config_connection_disconnected', $lang);
 
         $base = array(
             'FriendlyName' => array(

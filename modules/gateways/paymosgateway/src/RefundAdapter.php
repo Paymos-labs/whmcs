@@ -445,8 +445,10 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                 }
             }
             foreach ($visibleModes as $mode) {
-                $labelKey = $mode === RefundStates::FULL ? 'refund_button_full' : 'refund_button_overpayment';
-                $label = htmlspecialchars(Translation::text($labelKey, $lang), ENT_QUOTES, 'UTF-8');
+                $labelText = $mode === RefundStates::FULL
+                    ? Translation::text('refund_button_full', $lang)
+                    : Translation::text('refund_button_overpayment', $lang);
+                $label = htmlspecialchars($labelText, ENT_QUOTES, 'UTF-8');
                 $html .= '<button type="button" class="btn btn-default paymos-refund" data-mode="' . $mode . '" data-token="' . $tokens[$mode] . '">' . $label . '</button>';
             }
             $fallbackError = json_encode(
