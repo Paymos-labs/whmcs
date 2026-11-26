@@ -1,5 +1,7 @@
 # Paymos for WHMCS
 
+**English** | [简体中文](README.zh-CN.md) | [Русский](README.ru.md) | [Español](README.es.md) | [Deutsch](README.de.md) | [Türkçe](README.tr.md)
+
 Official WHMCS gateway module for Paymos. It puts a stablecoin option on the
 client's invoice, and when the transfer confirms on chain it books the payment
 through WHMCS itself — so provisioning, service activation and every automation
@@ -10,6 +12,10 @@ shape. It works off invoices rather than carts, and passes the WHMCS client id
 through so a payment stays attached to the right account. The invoice keeps the
 currency WHMCS raised it in; the rate the client pays at is locked when they pay,
 so the amount you billed is the amount that settles.
+
+[![Watch: 12 Official CMS Crypto Plugins — 1-Click Connect (Paymos)](https://i.ytimg.com/vi/VMLUGVumYkg/maxresdefault.jpg)](https://www.youtube.com/watch?v=VMLUGVumYkg)
+
+> **Video walkthrough (1:12, subtitles in 6 languages):** [Watch on YouTube](https://www.youtube.com/watch?v=VMLUGVumYkg)
 
 ## Requirements
 
