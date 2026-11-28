@@ -19,6 +19,13 @@ final class GatewayLink
     /** Snapshot status of a create whose POST was sent but whose result is not bound yet. */
     const STATUS_CREATING = 'creating';
 
+    /**
+     * Snapshot status of a create the server refused for good (a 4xx other than
+     * 408/429). The server made no invoice for it: the row is never replayed,
+     * read or cancelled, and the next render cuts the next key.
+     */
+    const STATUS_CREATE_FAILED = 'create_failed';
+
     /** @var InvoiceStoreInterface */
     private $store;
 
@@ -119,8 +126,13 @@ final class GatewayLink
             $existing = $this->recoverPendingIntent($params, $existing, $config);
         }
 
-        if (is_array($existing) && !empty($existing['paid_late_noted'])) {
-            $this->blockPaidLate($existing, 'Paymos invoice was paid late and requires manual review.');
+        // invoice.paid_late marks the row its event names, which may be an older
+        // generation than the latest row: any marked row blocks the invoice.
+        $paidLate = is_array($existing) && !empty($existing['paid_late_noted'])
+            ? $existing
+            : $this->store->findPaidLateByWhmcsInvoiceId($invoiceId);
+        if (is_array($paidLate)) {
+            $this->blockPaidLate($paidLate, 'Paymos invoice was paid late and requires manual review.');
         }
 
         $this->assertNoProcessingCurrencyMismatch($invoiceId, $currency);
@@ -130,7 +142,7 @@ final class GatewayLink
             return $this->button($existing['payment_url'], $buttonText);
         }
 
-        if (is_array($existing)) {
+        if (is_array($existing) && !self::isFailedCreate($existing)) {
             $this->closeBeforeReplacing($existing, $config);
         }
 
@@ -158,10 +170,49 @@ final class GatewayLink
         );
         $this->store->save($intent);
 
-        $response = $this->client($config)->invoices()->create($payload);
+        try {
+            $response = $this->client($config)->invoices()->create($payload);
+        } catch (ApiException $e) {
+            if (self::isDefinitiveRejection($e)) {
+                $this->markCreateFailed($intent);
+            }
+            throw $e;
+        }
         $row = $this->bindCreatedInvoice($intent, $response);
 
         return $this->button($row['payment_url'], $buttonText);
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     */
+    private static function isFailedCreate(array $row)
+    {
+        return isset($row['status']) && (string) $row['status'] === self::STATUS_CREATE_FAILED;
+    }
+
+    /**
+     * 400, 409, 410 and 422 refuse the invoice data itself: the server made no
+     * invoice for it and the same request will be refused again. 401, 403 and
+     * 404 point at the key or the project, which the merchant fixes without
+     * touching the invoice, so they stay with the intent for the replay, like
+     * 408, 429, 5xx and transport errors.
+     */
+    private static function isDefinitiveRejection(ApiException $e)
+    {
+        return in_array($e->statusCode(), array(400, 409, 410, 422), true);
+    }
+
+    /**
+     * @param array<string, mixed> $intent
+     * @return array<string, mixed>
+     */
+    private function markCreateFailed(array $intent)
+    {
+        $intent['status'] = self::STATUS_CREATE_FAILED;
+        $this->store->save($intent);
+
+        return $intent;
     }
 
     /**
@@ -189,8 +240,12 @@ final class GatewayLink
      * Replays the stored create request: same project, external_order_id,
      * amount and currency, sent to the environment it was first sent to. The
      * server answers a repeated key with the invoice it already made, so this
-     * learns the invoice the lost response carried. On any failure the intent
-     * stays pending and the render fails; no new key is cut over it.
+     * learns the invoice the lost response carried. When the server refuses
+     * the replay for good (see isDefinitiveRejection) it holds no invoice for
+     * this key that the client could have reached: the intent is closed as
+     * create_failed and the render goes on to the next key. On any other
+     * failure the intent stays pending and the render fails; no new key is cut
+     * over it.
      *
      * @param array<string, mixed> $params
      * @param array<string, mixed> $intent
@@ -218,7 +273,15 @@ final class GatewayLink
             $payload['products'] = $products;
         }
 
-        $response = $this->client($config, (string) $intent['environment'])->invoices()->create($payload);
+        try {
+            $response = $this->client($config, (string) $intent['environment'])->invoices()->create($payload);
+        } catch (ApiException $e) {
+            if (!self::isDefinitiveRejection($e)) {
+                throw $e;
+            }
+
+            return $this->markCreateFailed($intent);
+        }
 
         return $this->bindCreatedInvoice($intent, $response);
     }
@@ -549,6 +612,12 @@ final class GatewayLink
 
         $environment = (string) $row['environment'];
         $recorded = isset($row['status']) ? (string) $row['status'] : '';
+        if (self::endedUnpaid($recorded)) {
+            // The SDK closes a row recorded as ended unpaid without a request.
+            // A payment that arrived after that is known to the server
+            // (paid_late_at) before invoice.paid_late reaches the callback.
+            $this->blockIfPaidLateOnServer($row, $config, $environment);
+        }
         $observed = new \stdClass();
         $observed->invoice = null;
         $result = (new InvoiceReplacement(function () use ($config, $environment, $observed) {
@@ -646,6 +715,39 @@ final class GatewayLink
         ), 'Manual review: ' . $result->summary());
 
         throw new InvoiceReplacementBlockedException($result);
+    }
+
+    private static function endedUnpaid(string $status): bool
+    {
+        return in_array(
+            StatusMapper::invoiceAction('', strtolower(trim($status))),
+            array(StatusMapper::ACTION_CANCEL_ORDER, StatusMapper::ACTION_FAIL_ORDER),
+            true
+        );
+    }
+
+    /**
+     * One read of the invoice before a row recorded as ended unpaid is
+     * replaced. No answer is no evidence of a late payment: the recorded
+     * final status decides, as it did without the read.
+     *
+     * @param array<string, mixed> $row
+     */
+    private function blockIfPaidLateOnServer(array $row, Config $config, string $environment): void
+    {
+        try {
+            $invoice = $this->client($config, $environment)->invoices()->get((string) $row['paymos_invoice_id']);
+        } catch (\Exception $e) {
+            return;
+        }
+
+        if (is_array($invoice) && !empty($invoice['paid_late_at'])) {
+            $row['paid_late_noted'] = is_scalar($invoice['paid_late_at'])
+                ? (string) $invoice['paid_late_at']
+                : '1';
+            $this->store->save($row);
+            $this->blockPaidLate($row, 'Paymos invoice was paid late and requires manual review.');
+        }
     }
 
     /**

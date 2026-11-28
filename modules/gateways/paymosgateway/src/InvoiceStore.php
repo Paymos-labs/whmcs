@@ -21,7 +21,8 @@ final class InvoiceStore implements InvoiceStoreInterface
      */
     public static function closedStatuses()
     {
-        return array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled', self::STATUS_WHMCS_INVOICE_MISSING);
+        return array('paid', 'paid_over', 'underpaid', 'expired', 'cancelled', self::STATUS_WHMCS_INVOICE_MISSING,
+            GatewayLink::STATUS_CREATE_FAILED);
     }
 
     /** @var InMemoryInvoiceStore|null */
@@ -35,6 +36,22 @@ final class InvoiceStore implements InvoiceStoreInterface
 
         $row = \WHMCS\Database\Capsule::table(Migrations::INVOICES_TABLE)
             ->where('whmcs_invoice_id', (int) $invoiceId)
+            ->orderBy('id', 'desc')
+            ->first();
+
+        return $this->toArray($row);
+    }
+
+    public function findPaidLateByWhmcsInvoiceId($invoiceId)
+    {
+        if (!$this->hasCapsule()) {
+            return $this->fallback()->findPaidLateByWhmcsInvoiceId($invoiceId);
+        }
+
+        $row = \WHMCS\Database\Capsule::table(Migrations::INVOICES_TABLE)
+            ->where('whmcs_invoice_id', (int) $invoiceId)
+            ->whereNotNull('paid_late_noted')
+            ->where('paid_late_noted', '<>', '')
             ->orderBy('id', 'desc')
             ->first();
 

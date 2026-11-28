@@ -23,6 +23,18 @@ final class InMemoryInvoiceStore implements InvoiceStoreInterface
         return isset($this->rowsByExternalOrderId[$externalOrderId]) ? $this->rowsByExternalOrderId[$externalOrderId] : null;
     }
 
+    public function findPaidLateByWhmcsInvoiceId($invoiceId)
+    {
+        $found = null;
+        foreach ($this->rowsByExternalOrderId as $row) {
+            if ((int) $row['whmcs_invoice_id'] === (int) $invoiceId && !empty($row['paid_late_noted'])) {
+                $found = $row;
+            }
+        }
+
+        return $found;
+    }
+
     public function findByExternalOrderId($externalOrderId)
     {
         $externalOrderId = (string) $externalOrderId;

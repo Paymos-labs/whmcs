@@ -418,13 +418,18 @@ final class RefundAdapter implements NativeRefundProjectorInterface
                 if ($this->store->blocksNewIntent($intent)) {
                     $tokens[$intent->mode()] = $intent->toArray()['request_token'];
                 }
-                if ($intent->mode() === RefundStates::FULL && $intent->cashState() === RefundStates::COMPLETED) {
+                $observation = $intent->observation();
+                // A full refund whose cash completed, or whose WHMCS record went
+                // to review, is not offered again: the invoice can still read
+                // Paid while the WHMCS write awaits manual review.
+                if ($intent->mode() === RefundStates::FULL && ($intent->cashState() === RefundStates::COMPLETED
+                    || ($observation !== null && $observation->status() === 'completed')
+                    || $intent->projectionState() === RefundStates::NATIVE_REVIEW)) {
                     $hasCompletedFull = true;
                 }
                 if ($intent->mode() === RefundStates::OVERPAYMENT && $intent->cashState() === RefundStates::COMPLETED) {
                     $hasCompletedOver = true;
                 }
-                $observation = $intent->observation();
                 $values = array($intent->operationId(), $intent->mode(), $intent->cashState(), $intent->projectionState(),
                     $intent->toArray()['review_reason'], $observation === null ? '' : $observation->principalDecimal() . ' ' . $observation->currency() . '/' . $observation->network());
                 foreach ($values as $i => $value) {

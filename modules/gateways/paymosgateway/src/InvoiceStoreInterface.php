@@ -12,6 +12,14 @@ interface InvoiceStoreInterface
     public function findByWhmcsInvoiceId($invoiceId);
 
     /**
+     * A row of the WHMCS invoice, of any generation, that carries the
+     * paid-late marker.
+     *
+     * @return array<string, mixed>|null
+     */
+    public function findPaidLateByWhmcsInvoiceId($invoiceId);
+
+    /**
      * @return array<string, mixed>|null
      */
     public function findByExternalOrderId($externalOrderId);

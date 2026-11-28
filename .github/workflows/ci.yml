@@ -21,7 +21,7 @@ jobs:
           extensions: mbstring, openssl
           coverage: none
       - name: Load the pinned SDK for source tests
-        run: git clone --depth 1 --branch v1.11.0 https://github.com/Paymos-labs/php-sdk.git "$RUNNER_TEMP/sdk"
+        run: git clone --depth 1 --branch v1.12.0 https://github.com/Paymos-labs/php-sdk.git "$RUNNER_TEMP/sdk"
       - name: Module unit and source compilation tests
         env:
           PAYMOS_SDK_SRC: ${{ runner.temp }}/sdk/src

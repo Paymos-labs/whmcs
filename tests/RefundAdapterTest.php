@@ -172,6 +172,8 @@ final class WhmcsRefundServer implements TransportInterface
     public $scopeConflict = false;
     public $omitSummary = false;
     public $invoiceFailure = null;
+    /** Statuses the next refund reads answer with (temporary 401/403/404 after an accepted POST). */
+    public $refundReadFailures = array();
     private $db;
 
     public function __construct($db) { $this->db = $db; }
@@ -213,6 +215,13 @@ final class WhmcsRefundServer implements TransportInterface
             return new HttpResponse(201, json_encode($this->refunds[$key]), array());
         }
         if (strpos($path, '/v1/refunds/') === 0) {
+            if ($this->refundReadFailures) {
+                $status = (int) array_shift($this->refundReadFailures);
+                return new HttpResponse($status, json_encode(array(
+                    'type' => 'https://api.paymos.io/errors/unavailable', 'title' => 'Unavailable', 'status' => $status,
+                    'detail' => 'Simulated temporary refund read failure', 'code' => 'refund_not_found',
+                )), array('content-type' => 'application/problem+json'));
+            }
             $id = basename($path);
             foreach ($this->refunds as $refund) {
                 if ($refund['withdrawal_id'] === $id) { return new HttpResponse(200, json_encode($refund), array()); }
@@ -506,6 +515,54 @@ function test_whmcs_refund_native_status_failure_retries_only_status_after_exact
     assertSameValue(RefundStates::PROJECTION_APPLIED, $afterRecovery->projectionState(), 'status retry marks projection applied once Refunded.');
     assertSameValue(2, count($f->native->snapshot['accounts']), 'status retry cannot repeat financial entry.');
     assertSameValue('Refunded', $f->native->snapshot['invoice']['status'], 'status recovers from exact outgoing row.');
+}
+
+/**
+ * CMSP-47: the full refund reached the buyer, but the WHMCS record went to
+ * review and the invoice still reads Paid. The panel must not offer the full
+ * refund again.
+ */
+function test_whmcs_refund_panel_hides_full_refund_when_completed_cash_awaits_native_review()
+{
+    $f = whmcs_refund_fixture();
+    $f->native->snapshot['mapping']['status'] = 'paid';
+    $intent = $f->adapter->submit(whmcs_refund_input());
+    $f->native->statusFailure = true;
+    whmcs_refund_throws(static function () use ($f, $intent) { whmcs_refund_complete($f, $intent); }, 'native_status_unknown');
+    $review = $f->store->getIntent($intent->operationId());
+    assertSameValue(RefundStates::NATIVE_REVIEW, $review->projectionState(), 'the WHMCS record is under review.');
+    assertSameValue('completed', $review->observation()->status(), 'the cash refund itself completed.');
+    assertSameValue('Paid', $f->native->snapshot['invoice']['status'], 'the WHMCS invoice still reads Paid.');
+
+    $html = $f->adapter->panel(42);
+
+    assertContainsValue($intent->operationId(), $html, 'the refund stays in the panel history.');
+    assertFalseValue(strpos($html, 'data-mode="full"') !== false, 'a refunded invoice is not offered a second full refund.');
+}
+
+/**
+ * BUG-1347 (feature-audit 3.11): the server accepted the refund POST, but the
+ * reverse read right after it answered a temporary 401/403/404. The next
+ * reconcile reads again and the completed refund is projected into WHMCS.
+ */
+function test_whmcs_refund_accepted_refund_survives_a_temporary_reverse_read_failure()
+{
+    foreach (array(401, 403, 404) as $status) {
+        $f = whmcs_refund_fixture();
+        $f->server->refundReadFailures = array($status, $status);
+        $intent = $f->adapter->submit(whmcs_refund_input());
+        assertSameValue(1, count($f->server->refunds), $status . ': the refund was accepted once.');
+
+        $f->server->refunds[$intent->externalOrderId()]['status'] = 'completed';
+        $f->adapter->reconcile($intent->operationId());
+
+        $after = $f->store->getIntent($intent->operationId());
+        assertSameValue('wd_1', $after->withdrawalId(), $status . ': the accepted refund is bound after the read recovers.');
+        assertSameValue(RefundStates::COMPLETED, $after->cashState(), $status . ': the cash refund is completed.');
+        assertSameValue(RefundStates::PROJECTION_APPLIED, $after->projectionState(), $status . ': the refund is projected into WHMCS.');
+        assertSameValue('Refunded', $f->native->snapshot['invoice']['status'], $status . ': the WHMCS invoice is Refunded.');
+        assertSameValue(1, count($f->server->refunds), $status . ': no second refund is sent.');
+    }
 }
 
 function test_whmcs_refund_cash_projection_cannot_be_created_from_unverified_completion()

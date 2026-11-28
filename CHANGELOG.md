@@ -8,6 +8,20 @@ The public release history also lives at [paymos.io/changelog](https://paymos.io
 
 ## [Unreleased]
 
+## [1.8.4] - 2026-11-28
+
+- fix(whmcs): paid_late across rows, checked replacement, refund retry
+
+### Added
+- GitHub Actions CI workflow (`.github/workflows/ci.yml`) running `php tests/run.php` across PHP `7.4`, `8.2`, `8.4`, and `8.5` against the pinned `Paymos-labs/php-sdk` `v1.12.0` (the first release with `RefundCandidateStoreInterface`).
+
+### Fixed
+- **Invoice create refused for good kept being replayed (`GatewayLink`):** A `creating` intent whose create the server refused for good (400, 409, 410 or 422, for example `invoice_amount_below_minimum` or `invoice_idempotency_conflict`) was replayed with the old amount and project on every render, so the WHMCS invoice could never be paid through Paymos again. Such an intent is now closed as `create_failed`, the reconciler skips it, and the next render creates the next `whmcs_<invoice>_<n>` with the current amount. Key and access errors (401, 403, 404), network errors, 408, 429 and 5xx still keep the intent for the replay.
+- **`invoice.paid_late` on an older Paymos invoice did not block the open one (`GatewayLink`, `InvoiceStore`):** The paid-late guard read only the latest row of the WHMCS invoice, while the webhook marks the row the event names. A late payment on `whmcs_42_0` now blocks `whmcs_42_1` and any further replacement as well.
+- **Replacement of an expired, underpaid or cancelled Paymos invoice without asking the server (`GatewayLink`):** A row the webhook recorded as ended unpaid was replaced with no request, so a late payment the server already knew about (`paid_late_at`) was missed while `invoice.paid_late` was still being retried. The module now reads the invoice once before replacing such a row and blocks the replacement when `paid_late_at` is set.
+- **Full refund offered again for a refunded invoice (`RefundAdapter::panel()`):** When the cash refund completed but the WHMCS record went to review (`refund_native_status_not_refunded`, `native_projection_unknown`), the invoice could still read `Paid` and the panel showed **Full refund** again. A full refund whose cash completed or whose WHMCS record awaits review now hides the button.
+- **Accepted refund stuck after a temporary read failure (`RefundIntentStore`):** When the server accepted the refund but the read right after it answered a temporary 401/403/404, the refund stayed in `refund_read_unavailable` for good. The store now keeps the unverified withdrawal id (`RefundCandidateStoreInterface`), so the next check reads it again and records the refund in WHMCS.
+
 ## [1.8.3] - 2026-11-27
 
 - chore: rebuild canonical CMS package

@@ -295,11 +295,14 @@ function test_whmcs_gateway_link_renews_an_invoice_that_expired_on_the_server()
     assertSameValue('whmcs_42_1', $payload['external_order_id'], 'the create call must carry the bumped id.');
 }
 
-function test_whmcs_gateway_link_renews_without_a_lookup_when_the_invoice_is_already_final()
+function test_whmcs_gateway_link_renews_after_one_read_when_the_invoice_is_already_final()
 {
-    // The webhook already recorded the invoice as expired: no need to ask.
+    // The webhook already recorded the invoice as expired. Its status cannot
+    // change any more, but a late payment can still be on it (CMSP-25): one
+    // read for paid_late_at, then the replacement.
     $store = whmcs_store_with_existing_link('expired');
     $transport = new MockTransport(array(
+        whmcs_live_invoice_response('inv_existing', 'expired', time() - 3600),
         new HttpResponse(201, json_encode(array(
             'invoice_id' => 'inv_fresh',
             'status' => 'awaiting_client',
@@ -313,8 +316,7 @@ function test_whmcs_gateway_link_renews_without_a_lookup_when_the_invoice_is_alr
     }))->render(whmcs_gateway_params());
 
     assertContainsValue('https://checkout.paymos.test/fresh', $html, 'a final invoice must be replaced by a fresh one.');
-    assertSameValue(1, count($transport->requests()), 'a recorded final status needs no lookup, only the create.');
-    assertSameValue('POST', $transport->requests()[0]['method'], 'the only call is the create.');
+    assertSameValue(array('GET', 'POST'), array_column($transport->requests(), 'method'), 'one read for paid_late_at, then the create.');
 }
 
 function test_whmcs_gateway_link_never_renews_a_paid_invoice()
@@ -574,6 +576,7 @@ final class WhmcsFailingBindStore implements PaymosWhmcs\InvoiceStoreInterface
     }
 
     public function findByWhmcsInvoiceId($invoiceId) { return $this->inner->findByWhmcsInvoiceId($invoiceId); }
+    public function findPaidLateByWhmcsInvoiceId($invoiceId) { return $this->inner->findPaidLateByWhmcsInvoiceId($invoiceId); }
     public function findByExternalOrderId($externalOrderId) { return $this->inner->findByExternalOrderId($externalOrderId); }
     public function updateStatus($paymosInvoiceId, $status) { $this->inner->updateStatus($paymosInvoiceId, $status); }
     public function findUnpaidRecent($limit, $sinceTimestamp) { return $this->inner->findUnpaidRecent($limit, $sinceTimestamp); }
@@ -1181,4 +1184,206 @@ function test_whmcs_gateway_link_recover_pending_intent_preserves_products()
         isset($replayPayload['products']) ? $replayPayload['products'] : null,
         'recoverPendingIntent() must preserve WHMCS invoice line items in products[].'
     );
+}
+
+/**
+ * CMSP-09: a create the server refused for good (400 amount below minimum)
+ * is not replayed for ever. After the admin raises the amount, the next
+ * render cuts the next key with the current amount.
+ */
+function test_whmcs_gateway_link_definitive_create_rejection_does_not_pin_the_old_amount()
+{
+    $store = new InMemoryInvoiceStore();
+    $adapter = new FakeWhmcsAdapter();
+    $transport = new WhmcsScriptedTransport(array(
+        whmcs_problem(400, 'invoice_amount_below_minimum', 'Invoice amount is below the minimum.'),
+        whmcs_created_response('inv_fresh'),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+
+    $error = whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), whmcs_gateway_params(array('amount' => '0.50')));
+    assertTrueValue($error instanceof \Paymos\Exception\ApiException, 'the buyer sees the server refusal.');
+    assertFalseValue(GatewayLink::isPendingIntent($store->findByExternalOrderId('whmcs_42_0')), 'a refused create is not a pending intent.');
+
+    $html = (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params(array('amount' => '15.00')));
+
+    $requests = $transport->requests();
+    assertSameValue(2, count($requests), 'the refused request is not replayed.');
+    $next = json_decode($requests[1]['body'], true);
+    assertSameValue('whmcs_42_1', $next['external_order_id'], 'the next attempt has a new key.');
+    assertSameValue('15.00', $next['amount'], 'the next attempt carries the current amount.');
+    assertContainsValue('https://checkout.paymos.test/inv_fresh', $html, 'the buyer can pay the new invoice.');
+    assertSameValue(0, (new PaymosWhmcs\Reconciler($store, $adapter, $factory))->run(whmcs_gateway_params(), time()), 'the reconciler applies nothing.');
+    $reads = array_slice($transport->requests(), 2);
+    assertSameValue(array('https://api.paymos.test/v1/invoices/inv_fresh'), array_column($reads, 'url'), 'the reconciler reads only the new invoice, never the refused placeholder.');
+}
+
+/**
+ * CMSP-09: the stored intent of a lost create is replayed; when the server
+ * refuses the replay for good (409 after a reconnect to another project), the
+ * intent is closed and the current amount goes out under the next key.
+ */
+function test_whmcs_gateway_link_definitive_replay_rejection_moves_to_the_next_key()
+{
+    $store = new InMemoryInvoiceStore();
+    $adapter = new FakeWhmcsAdapter();
+    $transport = new WhmcsScriptedTransport(array(
+        new \RuntimeException('timeout after the request was sent'),
+        whmcs_problem(409, 'invoice_idempotency_conflict', 'Another invoice uses this external order id.'),
+        whmcs_created_response('inv_next'),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+    $factory = static function () use ($client) { return $client; };
+
+    whmcs_render_expecting_failure(new GatewayLink($store, $factory, $adapter), whmcs_gateway_params());
+    assertTrueValue(GatewayLink::isPendingIntent($store->findByExternalOrderId('whmcs_42_0')), 'a lost create stays pending.');
+
+    $html = (new GatewayLink($store, $factory, $adapter))->render(whmcs_gateway_params(array('amount' => '120.00')));
+
+    $requests = $transport->requests();
+    assertSameValue(3, count($requests), 'create (lost), replay (refused), next create.');
+    assertSameValue(json_decode($requests[0]['body'], true), json_decode($requests[1]['body'], true), 'the replay is the original request.');
+    $next = json_decode($requests[2]['body'], true);
+    assertSameValue('whmcs_42_1', $next['external_order_id'], 'the next attempt has a new key.');
+    assertSameValue('120.00', $next['amount'], 'the next attempt carries the current amount.');
+    assertContainsValue('https://checkout.paymos.test/inv_next', $html, 'the buyer can pay the new invoice.');
+}
+
+/** CMSP-09: a transient failure (503) still keeps the intent for the replay. */
+function test_whmcs_gateway_link_transient_create_failure_keeps_the_intent()
+{
+    $store = new InMemoryInvoiceStore();
+    $transport = new WhmcsScriptedTransport(array(
+        whmcs_problem(503, 'service_unavailable', 'Try again later.'),
+        whmcs_problem(503, 'service_unavailable', 'Try again later.'),
+        whmcs_problem(503, 'service_unavailable', 'Try again later.'),
+        whmcs_problem(503, 'service_unavailable', 'Try again later.'),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+    whmcs_render_expecting_failure(new GatewayLink($store, static function () use ($client) {
+        return $client;
+    }, new FakeWhmcsAdapter()), whmcs_gateway_params());
+
+    assertTrueValue(GatewayLink::isPendingIntent($store->findByExternalOrderId('whmcs_42_0')), 'an unknown create result stays pending for the replay.');
+}
+
+/**
+ * A revoked key (401/403) or a missing project (404) is fixed by the merchant
+ * without touching the invoice: the intent is replayed under the same key, and
+ * no render cuts a new row or key while the key is broken.
+ */
+function test_whmcs_gateway_link_key_or_access_refusal_keeps_the_intent()
+{
+    foreach (array(401, 403, 404) as $status) {
+        $store = new InMemoryInvoiceStore();
+        $transport = new WhmcsScriptedTransport(array(
+            whmcs_problem($status, 'access_refused', 'Refused.'),
+            whmcs_problem($status, 'access_refused', 'Refused.'),
+            whmcs_created_response('inv_after_fix'),
+        ));
+        $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+        $factory = static function () use ($client) { return $client; };
+
+        whmcs_render_expecting_failure(new GatewayLink($store, $factory, new FakeWhmcsAdapter()), whmcs_gateway_params());
+        whmcs_render_expecting_failure(new GatewayLink($store, $factory, new FakeWhmcsAdapter()), whmcs_gateway_params());
+        assertTrueValue(GatewayLink::isPendingIntent($store->findByExternalOrderId('whmcs_42_0')), $status . ': the intent stays pending.');
+        assertSameValue(null, $store->findByExternalOrderId('whmcs_42_1'), $status . ': no new key is cut per view.');
+
+        $html = (new GatewayLink($store, $factory, new FakeWhmcsAdapter()))->render(whmcs_gateway_params());
+        $keys = array_map(static function ($request) {
+            return json_decode($request['body'], true)['external_order_id'];
+        }, array_values(array_filter($transport->requests(), static function ($request) {
+            return $request['method'] === 'POST';
+        })));
+        assertSameValue(array('whmcs_42_0', 'whmcs_42_0', 'whmcs_42_0'), $keys, $status . ': every create reuses the first key.');
+        assertContainsValue('https://checkout.paymos.test/inv_after_fix', $html, $status . ': the invoice is paid once the key works.');
+    }
+}
+
+/**
+ * CMSP-24: invoice.paid_late marks the row named in the event. When that is an
+ * older generation (whmcs_42_0) and a newer one (whmcs_42_1) is open, the
+ * newer link must not be offered either.
+ */
+function test_whmcs_gateway_link_paid_late_on_an_older_generation_blocks_the_open_one()
+{
+    $store = new InMemoryInvoiceStore();
+    $store->save(array(
+        'whmcs_invoice_id' => 42,
+        'paymos_invoice_id' => 'inv_old',
+        'external_order_id' => 'whmcs_42_0',
+        'environment' => 'sandbox',
+        'project_id' => 'prj_123',
+        'amount' => '100.00',
+        'currency' => 'USD',
+        'payment_url' => 'https://checkout.paymos.test/inv_old',
+        'status' => 'expired',
+        'renew_count' => 0,
+        'paid_late_noted' => 'evt_late_old',
+    ));
+    $store->save(array(
+        'whmcs_invoice_id' => 42,
+        'paymos_invoice_id' => 'inv_open',
+        'external_order_id' => 'whmcs_42_1',
+        'environment' => 'sandbox',
+        'project_id' => 'prj_123',
+        'amount' => '100.00',
+        'currency' => 'USD',
+        'payment_url' => 'https://checkout.paymos.test/inv_open',
+        'status' => 'awaiting_client',
+        'renew_count' => 1,
+    ));
+    $adapter = new FakeWhmcsAdapter();
+    $transport = new MockTransport(array(
+        whmcs_live_invoice_response('inv_open', 'awaiting_client', time() + 600),
+    ));
+    $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+    $blocked = whmcs_render_expecting_block(new GatewayLink($store, static function () use ($client) {
+        return $client;
+    }, $adapter), whmcs_gateway_params());
+
+    assertSameValue(\Paymos\Plugin\InvoiceReplacementResult::REASON_PAID, $blocked->result()->reason(), 'the late payment blocks like a paid invoice.');
+    assertSameValue('inv_old', $blocked->result()->invoiceId(), 'the block names the invoice that was paid late.');
+    assertSameValue(0, count($transport->requests()), 'no request is needed: the marker is local.');
+    assertSameValue(null, $store->findByExternalOrderId('whmcs_42_2'), 'no further generation is cut.');
+    assertSameValue(1, count($adapter->logs), 'the invoice is routed to manual review.');
+}
+
+/**
+ * CMSP-25: the webhook recorded expired, then the buyer paid late and the
+ * server set paid_late_at while invoice.paid_late is still being retried. The
+ * replacement is cut only after the server has been asked.
+ */
+function test_whmcs_gateway_link_reads_paid_late_at_before_replacing_a_final_unpaid_row()
+{
+    foreach (array('100.00', '120.00') as $amount) {
+        $store = whmcs_store_with_existing_link('expired');
+        $adapter = new FakeWhmcsAdapter();
+        $transport = new MockTransport(array(
+            new HttpResponse(200, json_encode(array(
+                'invoice_id' => 'inv_existing',
+                'project_id' => 'prj_123',
+                'status' => 'expired',
+                'is_test' => true,
+                'is_final' => true,
+                'payment_url' => 'https://checkout.paymos.test/existing',
+                'expires_at' => time() - 3600,
+                'paid_late_at' => 1777978800,
+                'order' => array('external_id' => 'whmcs_42_0', 'amount' => '100', 'currency' => 'USD'),
+            )), array()),
+        ));
+        $client = new Client(new ClientConfig('pk_test_123', 'sk_test_123', 'https://api.paymos.test'), $transport);
+
+        $blocked = whmcs_render_expecting_block(new GatewayLink($store, static function () use ($client) {
+            return $client;
+        }, $adapter), whmcs_gateway_params(array('amount' => $amount)));
+
+        assertSameValue(\Paymos\Plugin\InvoiceReplacementResult::REASON_PAID, $blocked->result()->reason(), $amount . ': the late payment blocks the replacement.');
+        assertSameValue(array('GET'), array_column($transport->requests(), 'method'), $amount . ': one read and no create.');
+        assertSameValue('1777978800', $store->findByExternalOrderId('whmcs_42_0')['paid_late_noted'], $amount . ': the marker is kept for later renders.');
+        assertSameValue(null, $store->findByExternalOrderId('whmcs_42_1'), $amount . ': no replacement is cut.');
+    }
 }
